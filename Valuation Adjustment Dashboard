@@ -1,0 +1,2971 @@
+import streamlit as st
+import pandas as pd
+import os
+import plotly.graph_objects as go
+import colorsys
+import numpy as np
+import plotly.colors
+from fpdf import FPDF
+import io
+from plotly.subplots import make_subplots
+import json
+import plotly.express as px
+from collections import defaultdict
+
+def page_dashboard():
+    # --- Step 1: Load Files ---
+    base_path = r'\\asiapac.ad.jpmorganchase.com\home2\aphome00121\F746518\My_Received_Files\VS code'
+    first_set = ['JPMADV.xlsx', 'JPMSA.xlsx', 'JPMT.xlsx', 'FEDSA.xlsx', 'EMEASA.xlsx']
+    second_set = ['Var_JPMADV.xlsx', 'Var_JPMSA.xlsx', 'Var_JPMT.xlsx', 'Var_FEDSA.xlsx', 'Var_EMEASA.xlsx']
+    
+    COMMENTS_FILE = os.path.join(base_path, "comments.json")
+
+    def load_comments():
+        if os.path.exists(COMMENTS_FILE):
+            with open(COMMENTS_FILE, "r") as f:
+                return json.load(f)
+        return {}
+
+    def save_comments(comments):
+        with open(COMMENTS_FILE, "w") as f:
+            json.dump(comments, f)
+
+
+    def load_and_concat(files, date_col='DATE', drop_date=False):
+        dfs = []
+        for file in files:
+            file_path = os.path.join(base_path, file)
+            df = pd.read_excel(file_path, sheet_name='Sheet1')
+            if 'Date' in df.columns:
+                df.rename(columns={'Date': 'DATE'}, inplace=True)
+            if 'DATE' in df.columns:
+                df['DATE'] = pd.to_datetime(df['DATE']).dt.strftime('%Y%m')
+                if drop_date:
+                    df = df.drop(columns=['DATE'])
+            dfs.append(df)
+        return pd.concat(dfs, ignore_index=True)
+
+    # List of MEV files and their scenario names
+    mev_files = {
+        "JPMADV": "JPMADV MEV.xlsx",
+        "JPMSA": "JPMSA MEV.xlsx",
+        "JPMT": "JPMT MEV.xlsx",
+        "FEDSA": "FEDSA MEV.xlsx",
+        "EMEASA": "EMEASA MEV.xlsx"
+    }
+
+
+    mev_mapping_path = os.path.join(base_path, "MEV Mapping.xlsx")
+    mev_mapping = pd.read_excel(mev_mapping_path, sheet_name='Sheet1')
+
+    mev_dfs = {}
+    for scenario, filename in mev_files.items():
+        path = os.path.join(base_path, filename)
+        df = pd.read_excel(path, sheet_name='Sheet1')
+        df['Scenario'] = scenario  # Add scenario for easier filtering
+        if 'Date' in df.columns:
+            df.rename(columns={'Date': 'DATE'}, inplace=True)
+        if 'DATE' in df.columns:
+            df['DATE'] = pd.to_datetime(df['DATE']).dt.strftime('%Y%m')
+        # --- Merge with mapping to get LOB and StressMethod3 ---
+        df = df.merge(mev_mapping[['Variable', 'LOB', 'StressMethod3']], on='Variable', how='left')
+        mev_dfs[scenario] = df
+
+    
+
+    mev_desk_path = os.path.join(base_path, "MEV_mapping_with_desk.xlsx")
+    mev_final_df = pd.read_excel(mev_desk_path, sheet_name='final')
+    mev_final_df.columns = mev_final_df.columns.str.strip().str.lower()
+    mev_param_df = pd.read_excel(mev_desk_path, sheet_name='parameter')
+
+
+    
+    # Load dataframes
+    first_df = load_and_concat(first_set)
+    second_df = load_and_concat(second_set)
+
+    mul_files = [
+        'JPMADV_mul.xlsx',
+        'JPMSA_mul.xlsx',
+        'JPMT_mul.xlsx',
+        'EMEASA_mul.xlsx',
+        'FEDSA_mul.xlsx'
+    ]
+
+    def load_mul_files(files, date_col='DATE'):
+        dfs = []
+        for file in files:
+            file_path = os.path.join(base_path, file)
+            df = pd.read_excel(file_path, sheet_name='Sheet1')
+            if 'Date' in df.columns:
+                df.rename(columns={'Date': 'DATE'}, inplace=True)
+            if 'DATE' in df.columns:
+                df['DATE'] = pd.to_datetime(df['DATE']).dt.strftime('%Y%m')
+            dfs.append(df)
+        return pd.concat(dfs, ignore_index=True)
+
+    mul_df = load_mul_files(mul_files)
+
+
+
+
+    mul_files1 = [
+        'EMEASA_Desk_mul.xlsx',
+        'FEDSA_Desk_mul.xlsx',
+        'JPMADV_Desk_mul.xlsx',
+        'JPMSA_Desk_mul.xlsx',
+        'JPMT_Desk_mul.xlsx'
+    ]
+    dfs = []
+    for file in mul_files1:
+        file_path = os.path.join(base_path, file)
+        df = pd.read_excel(file_path, sheet_name='Sheet1')
+        # Standardize DATE column to string format for filtering
+        if 'DATE' in df.columns:
+            df['DATE'] = pd.to_datetime(df['DATE']).dt.strftime('%Y%m')
+        dfs.append(df)
+    mul_df1 = pd.concat(dfs, ignore_index=True)
+
+
+# --- Step 2: Sidebar Filters ---
+    quarters = first_df['DATE'].drop_duplicates().sort_values().astype(str).tolist()
+    scenarios = first_df['Scenario'].drop_duplicates().sort_values().astype(str).tolist()
+
+
+    if 'selected_quarter' not in st.session_state:
+        st.session_state.selected_quarter = quarters[-1]  # Default to latest as string
+    if 'selected_scenario' not in st.session_state:
+        st.session_state.selected_scenario = scenarios[0]  # Default to first as string
+    if 'selected_period2' not in st.session_state:
+        period2_options = [q for q in quarters if q < st.session_state.selected_quarter]
+        st.session_state.selected_period2 = period2_options[-1] if period2_options else None
+
+    if "comments" not in st.session_state:
+        st.session_state["comments"] = load_comments()
+    with st.sidebar:
+        st.markdown("""
+            <style>
+            .sidebar-header {
+                font-size: 2rem;
+                font-weight: 700;
+                color: #17607D;
+                margin-bottom: 24px;
+                font-family: 'Montserrat', 'Segoe UI', 'Arial', sans-serif;
+            }
+            .sidebar-label {
+                font-size: 1.08rem;
+                font-weight: 500;
+                color: #17607D;
+                margin-bottom: -1px;
+                margin-top: 18px;
+                font-family: 'Montserrat', 'Segoe UI', 'Arial', sans-serif;
+                display: block;
+            }
+            div[data-testid="stSelectbox"] {
+                margin-top: -9px;
+            }
+            </style>
+            <div class="sidebar-header">Filters</div>
+        """, unsafe_allow_html=True)
+
+        # Scenario filter first (use temp variables)
+        st.markdown('<div class="sidebar-label">Stress Scenario</div>', unsafe_allow_html=True)
+        temp_scenario = st.selectbox(
+            "", scenarios,
+            index=scenarios.index(st.session_state.get('selected_scenario', scenarios[0])),
+            key="temp_scenario"
+        )
+
+        # Period 1 filter (use temp variable)
+        st.markdown('<div class="sidebar-label">Period 1 (YYYYMM)</div>', unsafe_allow_html=True)
+        temp_quarter = st.selectbox(
+            "", quarters,
+            index=quarters.index(st.session_state.get('selected_quarter', quarters[-1])),
+            key="temp_quarter"
+        )
+
+        # Period 2 filter (only periods before selected Period 1, use temp variable)
+        period2_options = [q for q in quarters if q < temp_quarter]
+        st.markdown('<div class="sidebar-label">Period 2 (YYYYMM)</div>', unsafe_allow_html=True)
+        if period2_options:
+            temp_period2 = st.selectbox(
+                "", period2_options,
+                index=len(period2_options)-1,  # default to latest available
+                key="temp_sidebar_period2"
+            )
+        else:
+            temp_period2 = None
+            st.info("No earlier periods available for Period 2.")
+
+        # OK button
+        ok_filters = st.button("OK", key="ok_filters")
+        if ok_filters:
+            st.session_state.selected_scenario = temp_scenario
+            st.session_state.selected_quarter = temp_quarter
+            st.session_state.selected_period2 = temp_period2
+            st.session_state['filters_confirmed'] = True
+
+    st.markdown("""
+        <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;500&display=swap" rel="stylesheet">
+        <div style='
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 18px;
+            border-bottom: 2px solid #e3f2fd;
+            padding-bottom: 12px;
+        '>
+            <div>
+                <div style="
+                    font-family: 'Montserrat', 'Segoe UI', 'Arial', sans-serif;
+                    font-size: 2.7rem;
+                    font-weight: 700;
+                    color: #17607D;
+                    letter-spacing: -1px;
+                    margin-bottom: 2px;
+                ">
+                    Valuation Adjustment Dashboard
+                </div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # --- REPLACE THIS WITH THE NEW TAB CSS ---
+    tab_style = """
+    <style>
+    div[data-testid="stTabs"] > div {
+        width: 100%;
+        margin-left: 0;
+        margin-right: 0;
+        background: #f8fbfd;
+        border-bottom: 2.5px solid #A0A0A0;
+        box-shadow: 0 2px 8px rgba(128,128,128,0.08);
+        padding-top: 0px;
+        padding-bottom: 0px;
+    }
+    div[data-testid="stTabs"] > div > div {
+        display: flex;
+        width: 100%;
+    }
+    button[role="tab"] {
+        flex: 1 1 0;
+        min-width: 0;
+        font-size: 1.18rem;
+        font-family: 'Montserrat', 'Segoe UI', 'Arial', sans-serif;
+        font-weight: 600;
+        color: #17607D !important;
+        background: #f8fbfd !important;
+        border: none !important;
+        border-radius: 0 !important;
+        margin-right: 0px !important;
+        padding: 18px 0px !important;
+        transition: background 0.2s, color 0.2s, border-bottom 0.2s;
+        box-shadow: none !important;
+        border-bottom: 3px solid #17607D !important;
+        text-align: center;
+        letter-spacing: 0.5px;
+    }
+    button[role="tab"][aria-selected="true"] {
+        background: #fff !important;
+        color: #17607D !important;
+        border-bottom: 4px solid #17607D !important;
+        font-weight: 700 !important;
+        box-shadow: 0 2px 8px rgba(128,128,128,0.08);
+        z-index: 2;
+    }
+    button[role="tab"]:hover {
+        background: #e3f2fd !important;
+        color: #17607D !important;
+        border-bottom: 4px solid #17607D !important;
+    }
+    </style>
+    """
+    
+    st.markdown(tab_style, unsafe_allow_html=True)
+    # --- Tabs Navigation (Below Header) ---
+    tabs = st.tabs(["VA Analysis", "VA Comparison Analysis", "Regressions"])
+    with tabs[0]:
+        # --- Helper Functions for Colors ---
+        def get_shaded_color(hex_color, alpha=0.35):
+            """Convert hex to rgba for shaded fill."""
+            hex_color = hex_color.lstrip('#')
+            rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+            return f'rgba({rgb[0]},{rgb[1]},{rgb[2]},{alpha})'
+
+        def darken_color(hex_color, factor=0.7):
+            """Darken a hex color for border."""
+            hex_color = hex_color.lstrip('#')
+            rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+            h, l, s = colorsys.rgb_to_hls(*(c/255 for c in rgb))
+            l = max(0, l * factor)
+            r, g, b = colorsys.hls_to_rgb(h, l, s)
+            return f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
+
+
+
+        # --- Step 2: Filters ---
+        st.set_page_config(layout="wide")
+
+    
+
+        
+        # --- Step 3: Filter Data ---
+        filtered_first_df = first_df[
+        (first_df['DATE'] == st.session_state.selected_quarter) &
+        (first_df['Scenario'] == st.session_state.selected_scenario)
+        ]
+
+        # --- Step 4: Metrics Calculation ---
+        quarter_cols = ['Base','Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9']
+
+        grand_total_row = filtered_first_df[filtered_first_df['LOB'] == 'Grand Total']
+
+        if not grand_total_row.empty:
+            quarter_values = grand_total_row[quarter_cols].iloc[0]
+            va_max = quarter_values.max()
+            va_max_quarter = quarter_values.idxmax()
+            va_9q = grand_total_row['Q9'].values[0]
+        else:
+            va_max = None
+            va_max_quarter = None
+            va_9q = None
+
+        va_max_display = f"{va_max:.2f}" if va_max is not None else "N/A"
+        va_9q_display = f"{va_9q:.2f}" if va_9q is not None else "N/A"
+        va_max_quarter_display = va_max_quarter if va_max_quarter is not None else "-"
+
+        # --- Step 5: Professional Color Palette ---
+        custom_colors = [
+                    "#3D5A80", "#B5838D", "#F4D35E", "#E07A5F", "#43AA8B", "#993773", "#2C156B", "#A1C181",  "#F3722C", "#9BC1DB", "#9C0B0B", "#068006", "#0081A7", "#00BFFF", "#800080", "#FF8C00", "#B36494" ,"#9B5DE5", "#90BE6D", "#B7E1F3", "#577590"
+        ]
+        # --- Step 6: LOB Area Chart (Shaded, Slim Borders, Professional Colors)---
+
+        lob_group = filtered_first_df[filtered_first_df['LOB'] != 'Grand Total'].groupby('LOB')[quarter_cols].sum()
+        lob_group['Total'] = lob_group.sum(axis=1)
+        lob_group['Total'] = pd.to_numeric(lob_group['Total'], errors='coerce')
+        sorted_lobs = lob_group.sort_values('Total', ascending=False).index
+
+        fig_lob = go.Figure()
+        for i, lob in enumerate(sorted_lobs):
+            color = custom_colors[i % len(custom_colors)]
+            fig_lob.add_trace(go.Bar(
+                x=quarter_cols,
+                y=lob_group.loc[lob, quarter_cols],
+                name=lob,
+                marker=dict(color=color),
+            ))
+        fig_lob.update_layout(
+            barmode='stack',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.18,
+                xanchor="left",
+                x=0,
+                maxheight=0.15,
+                font=dict(size=9, family="Montserrat, Segoe UI, Arial, sans-serif"),
+                bgcolor="rgba(0,0,0,0)"
+            ),
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=320,
+            width=800,
+            plot_bgcolor="#f8fbfd",
+            paper_bgcolor="#f8fbfd",
+            xaxis=dict(title="", showgrid=False, zeroline=False, tickfont=dict(size=11, family="Montserrat, Segoe UI, Arial, sans-serif")),
+            yaxis=dict(title="", showgrid=True, zeroline=False, tickfont=dict(size=11, family="Montserrat, Segoe UI, Arial, sans-serif")),
+            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+        )
+
+        # --- Step 7: Stress Method Area Chart (Shaded, Slim Borders, Professional Colors) ---
+        stress_group = filtered_first_df.groupby('StressMethod3')[quarter_cols].sum()
+        stress_group['Total'] = stress_group.sum(axis=1)
+        stress_group['Total'] = pd.to_numeric(stress_group['Total'], errors='coerce')
+        sorted_stress = stress_group.sort_values('Total', ascending=False).index
+
+        
+        fig_stress = go.Figure()
+        for i, stress in enumerate(sorted_stress):
+            color = custom_colors[i % len(custom_colors)]
+            fig_stress.add_trace(go.Bar(
+                x=quarter_cols,
+                y=stress_group.loc[stress, quarter_cols],
+                name=stress,
+                marker=dict(color=color),
+            ))
+        fig_stress.update_layout(
+            barmode='stack',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.18,
+                xanchor="left",
+                x=0,
+                maxheight=0.15,
+                font=dict(size=9, family="Montserrat, Segoe UI, Arial, sans-serif"),
+                bgcolor="rgba(0,0,0,0)"
+            ),
+            height=320,
+            width=800,
+            margin=dict(l=10, r=10, t=10, b=100),
+            plot_bgcolor="#f8fbfd",
+            paper_bgcolor="#f8fbfd",
+            xaxis=dict(title="", showgrid=False, zeroline=False, tickfont=dict(size=11, family="Montserrat, Segoe UI, Arial, sans-serif")),
+            yaxis=dict(title="", showgrid=True, zeroline=False, tickfont=dict(size=11, family="Montserrat, Segoe UI, Arial, sans-serif")),
+            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+        )
+
+        filtered_pdf_df = first_df[
+            (first_df['DATE'] == st.session_state.selected_quarter) &
+            (first_df['Scenario'] == st.session_state.selected_scenario)]
+
+
+        pdf_columns = ['DATE', 'Scenario', 'LOB', 'StressMethod3', 'Base', 'Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9']
+        pdf_df = filtered_pdf_df[pdf_columns]
+
+        
+
+        # Group and aggregate as needed
+        agg_df = filtered_pdf_df[pdf_columns].groupby(
+            ['DATE', 'Scenario', 'LOB', 'StressMethod3'], as_index=False
+        ).sum()
+
+        # Write to Excel in memory
+        excel_buffer = io.BytesIO()
+        agg_df.to_excel(excel_buffer, index=False)
+        excel_buffer.seek(0)
+
+        # --- Step 8: Layout: Metric Boxes (left), Stress Method Chart (middle), LOB Chart (right)---
+        with st.expander("", expanded=True):
+            col1, col2 = st.columns([0.5, 1])
+            with col1:
+                st.markdown(
+                    "<div style='font-size:1.5rem; font-weight:700; color:#fff; margin-bottom:10px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>V</div>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    f"""
+                    <div style='
+                        display:flex;
+                        gap:24px;
+                        justify-content:flex-start;margin-left:80px;
+                        margin-top:40px;
+                    '>
+                        <div style='
+                            border:2px solid #17607D;
+                            border-radius:18px;
+                            padding:24px 16px;
+                            width:180px;
+                            text-align:center;
+                            background:linear-gradient(135deg, #e3f2fd 60%, #f8fbfd 100%);
+                            box-shadow:0 4px 16px rgba(23,96,125,0.12);
+                            display:flex;
+                            flex-direction:column;
+                            align-items:center;
+                            transition:box-shadow 0.2s;
+                        ' title="Maximum Valuation Adjustment (VA) value across all quarters">
+                            <div style='font-size:28px; font-weight:700; color:#17607D; margin-bottom:4px;'>
+                                📝 ${va_max_display}MM
+                            </div>
+                            <div style='font-size:13px; color:#1976d2; font-weight:500; margin-bottom:2px;'>
+                                Highest VA [{va_max_quarter_display}]
+                            </div>
+                            <div style='font-size:11px; color:#888; margin-top:2px;'>
+                            </div>
+                        </div>
+                        <div style='
+                            border:2px solid #388e3c;
+                            border-radius:18px;
+                            padding:24px 16px;
+                            width:180px;
+                            text-align:center;
+                            background:linear-gradient(135deg, #f1f8e9 60%, #f8fbfd 100%);
+                            box-shadow:0 4px 16px rgba(56,142,60,0.10);
+                            display:flex;
+                            flex-direction:column;
+                            align-items:center;
+                            transition:box-shadow 0.2s;
+                        ' title="Valuation Adjustment (VA) value for the 9th quarter">
+                            <div style='font-size:28px; font-weight:700; color:#388e3c; margin-bottom:4px;'>
+                                📉 ${va_9q_display}MM
+                            </div>
+                            <div style='font-size:13px; color:#388e3c; font-weight:500; margin-bottom:2px;'>
+                                9Q VA
+                            </div>
+                            <div style='font-size:11px; color:#888; margin-top:2px;'>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            with col2:
+                # Header and dropdown (appear only once)
+                header_col, dropdown_col = st.columns([1, 2])
+                with header_col:
+                    st.markdown(
+                        "<div style='font-size:1.2rem; font-weight:700; color:#17607D; margin-bottom:0px; margin-top:28px;'>Most Influential MEVs by Desk</div>",
+                        unsafe_allow_html=True
+                    )
+                with dropdown_col:
+                    valid_stress = set(mev_param_df['StressMethod3']).intersection(set(mev_final_df['stressmethod3']))
+                    unique_stress = [s for s in mev_mapping['StressMethod3'].dropna().unique() if s in valid_stress]
+                    selected_stress = st.multiselect(
+                        "",
+                        options=unique_stress,
+                        default=unique_stress[:1] if unique_stress else [],
+                        key="stressmethod3_influence_select"
+                    )
+
+                # Prepare time columns
+                sample_mev_df = list(mev_dfs.values())[0]
+                time_cols = [col for col in sample_mev_df.columns if str(col).startswith('M') or str(col).startswith('Q')]
+                time_cols_no_m1 = [col for col in time_cols if col != 'M1']
+                scenario = st.session_state.selected_scenario
+                date = st.session_state.selected_quarter
+
+                # Prepare columns for charts
+                if selected_stress:
+                    cols = st.columns(len(selected_stress))
+                    any_chart = False
+                    for idx, stress in enumerate(selected_stress):
+                        with cols[idx]:
+                            # Step 2: Get mapped variables
+                            mapped_vars = mev_mapping[mev_mapping['StressMethod3'] == stress]['Variable'].unique()
+                            # Step 3: For each mapped variable, get its time series from the correct MEV file (mev_dfs)
+                            base_var_values = {}
+                            mev_df = mev_dfs.get(scenario)
+                            for var in mapped_vars:
+                                row = mev_df[
+                                    (mev_df['DATE'] == date) &
+                                    (mev_df['Scenario'] == scenario) &
+                                    (mev_df['Variable'] == var)
+                                ]
+                                if not row.empty:
+                                    base_var_values[var] = np.array([row.iloc[0][col] for col in time_cols])
+                                else:
+                                    base_var_values[var] = np.zeros(len(time_cols))
+                            # Step 4: Apply diff1/lag1 transformation to all mapped variables
+                            transformed_vars = {}
+                            for var in mapped_vars:
+                                arr = base_var_values[var]
+                                transformed_vars[var] = arr
+                                transformed_vars[var + '_diff1'] = np.array([arr[i] - arr[i-1] if i > 0 else arr[i] for i in range(len(arr))])
+                                transformed_vars[var + '_lag1'] = np.array([arr[i-1] if i > 0 else arr[0] for i in range(len(arr))])
+                            # Step 5: Check which variables are used in the model (parameter/model sheet)
+                            model_mevs = mev_param_df[mev_param_df['StressMethod3'] == stress]['MEV_final'].unique()
+                            model_terms = mev_final_df[mev_final_df['stressmethod3'] == stress][['mev', 'un standerdized variable_mult']].values
+                            used_vars = {mev: transformed_vars[mev] for mev in model_mevs if mev in transformed_vars}
+                            # Step 6: Standardize
+                            standardized_vars = {}
+                            for mev in used_vars:
+                                arr = used_vars[mev]
+                                param_row = mev_param_df[(mev_param_df['StressMethod3'] == stress) & (mev_param_df['MEV_final'] == mev)]
+                                mean = param_row['mean'].values[0] if not param_row.empty else 0
+                                std = param_row['std'].values[0] if not param_row.empty else 1
+                                standardized = (arr - mean) / std if std != 0 else arr
+                                standardized_vars[mev] = standardized
+                            # Step 7: Build model terms (handle *, ^2), calculate influence (remove M1)
+                            n_periods = len(time_cols)
+                            n_periods_no_m1 = len(time_cols_no_m1)
+                            m1_idx = time_cols.index('M1') if 'M1' in time_cols else 0
+                            influence_scores = {}
+                            for mev in standardized_vars:
+                                infl = np.zeros(n_periods)
+                                for term, coef in model_terms:
+                                    term = str(term)
+                                    if term.lower() == 'constant':
+                                        continue
+                                    if '*' in term:
+                                        parts = [p.strip() for p in term.split('*')]
+                                        if mev in parts and all(p in standardized_vars for p in parts):
+                                            val = standardized_vars[mev] * 1
+                                            infl += coef * val
+                                    elif '^2' in term:
+                                        base = term.replace('^2', '').strip()
+                                        if mev == base and mev in standardized_vars:
+                                            infl += coef * (standardized_vars[mev] ** 2)
+                                    elif term == mev:
+                                        infl += coef * standardized_vars[mev]
+                                infl_no_m1 = np.delete(infl, m1_idx)
+                                influence_scores[mev] = np.mean(np.abs(infl_no_m1)) if n_periods_no_m1 > 0 else 0
+                            # Step 8: Plot the most influential variable (raw, as in MEV file, not diff/lag/standardized)
+                            if influence_scores:
+                                any_chart = True
+                                top_mev = max(influence_scores, key=influence_scores.get)
+                                top_score = influence_scores[top_mev]
+                                st.markdown(
+                                    f"<div style='font-size:1.1rem; color:#17607D; font-weight:600;'>Desk: <b>{stress}</b></div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f"<div style='font-size:1rem; color:#333;'>Most Influential MEV: <b>{top_mev}</b> (Avg Influence: <b>{top_score:.2f}</b>)</div>",
+                                    unsafe_allow_html=True
+                                )
+                                fig = go.Figure()
+                                base_var_name = top_mev.replace('_diff1', '').replace('_lag1', '').replace('^2', '').split('*')[0].strip()
+                                arr = base_var_values.get(base_var_name, np.zeros(len(time_cols)))
+                                fig.add_trace(go.Scatter(
+                                    x=time_cols,
+                                    y=arr,
+                                    mode='lines+markers',
+                                    name=base_var_name,
+                                    line=dict(color="#17607D", width=2),
+                                    marker=dict(size=6)
+                                ))
+                                fig.update_layout(
+                                    title=f"",
+                                    xaxis_title="",
+                                    yaxis_title="Value",
+                                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11),
+                                    plot_bgcolor="#f8fbfd",
+                                    paper_bgcolor="#f8fbfd",
+                                    height=300,
+                                    margin=dict(l=10, r=10, t=30, b=10)
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                    if not any_chart:
+                        st.info("No influential MEV found for the selected StressMethod3.")
+                else:
+                    st.info("No influential MEV found for the selected StressMethod3.")
+
+        with st.expander("", expanded=True):
+            col2, col3 = st.columns(2)        
+            with col2:
+                st.markdown(
+                    "<div style='font-size:1.5rem; font-weight:700; color:#17607D; margin-bottom:10px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>Desk Level VA</div>",
+                    unsafe_allow_html=True
+                )
+                fig_stress.update_layout(width=1200, height=400)  # Increase width and height
+
+                # Add Grand Total line to Stress Method Area Chart
+                grand_total_row = filtered_first_df[filtered_first_df['LOB'] == 'Grand Total']
+                if not grand_total_row.empty:
+                    grand_total_y = [grand_total_row[q].values[0] for q in quarter_cols]
+                    fig_stress.add_trace(go.Scatter(
+                        x=quarter_cols,
+                        y=grand_total_y,
+                        mode='lines+markers+text',
+                        name='Grand Total',
+                        line=dict(color="#030303", width=1, dash='solid'),
+                        marker=dict(size=5, color="#000000"),
+                        text=[f"{y:.0f}" for y in grand_total_y],
+                        textposition='top center',
+                        textfont=dict(size=10, color="#000000"),
+                        showlegend=True
+                    ))    
+
+
+                st.plotly_chart(fig_stress, use_container_width=False)
+                
+                # --- Comment for Stress Method Area Chart ---
+                comment_key_stress = f"expander1_stress_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}"
+                current_comment_stress = st.session_state["comments"].get(comment_key_stress, "")
+                comment_stress = st.text_area(
+                    f"Add your comment for Stress Method Area Chart: {st.session_state.selected_quarter} {st.session_state.selected_scenario}",
+                    value=current_comment_stress,
+                    key=comment_key_stress,
+                    height=60  # Decrease comment box height
+                )
+                if comment_stress != current_comment_stress:
+                    st.session_state["comments"][comment_key_stress] = comment_stress
+                    save_comments(st.session_state["comments"])
+                
+                # --- Excel Download Button (keep this) ---
+                st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+                st.download_button(
+                    label="Download Table as Excel",
+                    data=excel_buffer,
+                    file_name=f"VA Table_Quarter_{st.session_state.selected_quarter}&Scenario_{st.session_state.selected_scenario}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            with col3:
+                st.markdown(
+                    "<div style='font-size:1.5rem; font-weight:700; color:#17607D; margin-bottom:10px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>LOB Level VA</div>",
+                    unsafe_allow_html=True
+                )
+                fig_lob.update_layout(width=1200, height=400)  # Increase width and height
+
+                # Add Grand Total line to LOB Area Chart
+                grand_total_row = filtered_first_df[filtered_first_df['LOB'] == 'Grand Total']
+                if not grand_total_row.empty:
+                    grand_total_y = [grand_total_row[q].values[0] for q in quarter_cols]
+                    fig_lob.add_trace(go.Scatter(
+                        x=quarter_cols,
+                        y=grand_total_y,
+                        mode='lines+markers+text',
+                        name='Grand Total',
+                        line=dict(color="#000000", width=1, dash='solid'),
+                        marker=dict(size=5, color="#000000"),
+                        text=[f"{y:.0f}" for y in grand_total_y],
+                        textposition='top center',
+                        textfont=dict(size=10, color="#000000"),
+                        showlegend=True
+                    ))
+                st.plotly_chart(fig_lob, use_container_width=False)
+
+                #-- Comment for LOB Area Chart ---
+                comment_key_lob = f"expander1_lob_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}"
+                current_comment_lob = st.session_state["comments"].get(comment_key_lob, "")
+                comment_lob = st.text_area(
+                    f"Add your comment for LOB Area Chart: {st.session_state.selected_quarter} {st.session_state.selected_scenario}",
+                    value=current_comment_lob,
+                    key=comment_key_lob,
+                    height=60  # Decrease comment box height
+                )
+                if comment_lob != current_comment_lob:
+                    st.session_state["comments"][comment_key_lob] = comment_lob
+                    save_comments(st.session_state["comments"])
+                            
+            
+
+                
+            
+
+        with st.expander("", expanded=True):
+            # --- LOB Filter for Stacked Charts ---
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # --Custom styles for LOB Selection header and label--
+            st.markdown("""
+                <style>
+                .lob-header {
+                    font-size: 1.6rem;
+                    font-weight: 700;
+                    color: #17607D;
+                    margin-bottom: 6px;
+                    font-family: 'Montserrat', 'Segoe UI', 'Arial', sans-serif;
+                    letter-spacing: -0.5px;
+                }
+                </style>
+                <div class="lob-header">LOB Selection</div>
+            """, unsafe_allow_html=True)
+
+            lob_options = second_df['LOB'].drop_duplicates().sort_values()
+            selected_lob = st.selectbox("", lob_options, key="lob_select")  # Empty label so custom label is used
+
+            filtered_second_df = second_df[
+                (second_df['DATE'] == st.session_state.selected_quarter) &
+                (second_df['Scenario'] == st.session_state.selected_scenario) &
+                (second_df['LOB'] == selected_lob)
+            ]
+
+
+
+            # Create new quarterly columns in filtered_second_df
+            filtered_second_df = filtered_second_df.copy()  # Avoid SettingWithCopyWarning
+
+
+
+            filtered_second_df['Quarter1'] = filtered_second_df['M1'] + filtered_second_df['M2'] + filtered_second_df['Q1']
+            filtered_second_df['Quarter2'] = filtered_second_df['M4'] + filtered_second_df['M5'] + filtered_second_df['Q2']
+            filtered_second_df['Quarter3'] = filtered_second_df['M7'] + filtered_second_df['M8'] + filtered_second_df['Q3']
+            filtered_second_df['Quarter4'] = filtered_second_df['M10'] + filtered_second_df['M11'] + filtered_second_df['Q4']
+            filtered_second_df['Quarter5'] = filtered_second_df['M13'] + filtered_second_df['M14'] + filtered_second_df['Q5']
+            filtered_second_df['Quarter6'] = filtered_second_df['M16'] + filtered_second_df['M17'] + filtered_second_df['Q6']
+            filtered_second_df['Quarter7'] = filtered_second_df['M19'] + filtered_second_df['M20'] + filtered_second_df['Q7']
+            filtered_second_df['Quarter8'] = filtered_second_df['M22'] + filtered_second_df['M23'] + filtered_second_df['Q8']
+            filtered_second_df['Quarter9'] = filtered_second_df['M25'] + filtered_second_df['M26'] + filtered_second_df['Q9']
+
+            quarter_cols = ['Quarter1', 'Quarter2', 'Quarter3', 'Quarter4', 'Quarter5', 'Quarter6', 'Quarter7', 'Quarter8', 'Quarter9']
+
+
+            # --- Excel Download for Stacked Chart Data ---
+            download_cols = ['DATE', 'Scenario', 'LOB', 'StressMethod3', 'Variable'] + quarter_cols
+            agg_stacked_df = filtered_second_df[download_cols].groupby(
+                ['DATE', 'Scenario', 'LOB', 'StressMethod3', 'Variable'], as_index=False
+            ).sum()
+            excel_buffer2 = io.BytesIO()
+            agg_stacked_df.to_excel(excel_buffer2, index=False)
+            excel_buffer2.seek(0)
+            
+
+            # --- Excel Download for MEV Data ---
+            scenario_key = st.session_state.selected_scenario.split()[0]
+            mev_df = mev_dfs.get(scenario_key)
+            mev_vars = mev_mapping[mev_mapping['LOB'] == selected_lob]['Variable'].unique()
+            mev_download_df = mev_df[mev_df['Variable'].isin(mev_vars)]
+
+            excel_buffer_mev = io.BytesIO()
+            mev_download_df.to_excel(excel_buffer_mev, index=False)
+            excel_buffer_mev.seek(0)
+        
+
+
+            unique_stress = filtered_second_df['StressMethod3'].drop_duplicates().sort_values()
+            chart_cols = st.columns(len(unique_stress))
+
+            st.markdown("<br><div style='font-size:1.5rem; font-weight:700; color:#17607D; margin-bottom:10px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>Desk</div>", unsafe_allow_html=True)
+
+            # Get all relevant StressMethod3 for the selected LOB
+            stress_methods = mev_mapping[mev_mapping['LOB'] == selected_lob]['StressMethod3'].unique()
+            mev_x_cols = [
+                'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+            ]
+            stack_palette = [
+                "#3D5A80", "#B5838D", "#F4D35E", "#97422A","#1f77b4"
+            ]
+
+            line_palette = [
+                "#7f7f7f", "#bcbd22","#8c564b","#e377c2", "#ff7f0e",   "#2ca02c", "#d62728", "#9467bd"
+                ,"#1f77b4" ,"#17becf"
+            ]
+
+            for stress in stress_methods:
+                # --- Left: Stacked Bar Chart ---
+                stress_df = filtered_second_df[filtered_second_df['StressMethod3'] == stress]
+                stack_data = stress_df.pivot_table(index='Variable', values=quarter_cols)
+                fig_stack = go.Figure()
+                for j, variable in enumerate(stack_data.index):
+                    y_vals = stack_data.loc[variable].values
+                    color = stack_palette[j % len(stack_palette)]
+                    mul_val = stress_df[stress_df['Variable'] == variable]['Mul'].iloc[0] if 'Mul' in stress_df.columns else None
+                    legend_name = f"{variable} [mul: {mul_val:.2f}]" if mul_val is not None else variable
+
+                    
+                    fig_stack.add_trace(go.Bar(
+                        x=quarter_cols,
+                        y=y_vals,
+                        name=legend_name,
+                        marker=dict(
+                            color=color,
+                            line=dict(color=color, width=3)
+                        ),
+                        showlegend=True
+                    ))
+
+
+
+                fig_stack.update_layout(
+                    barmode='relative',
+                    title=f"{stress}",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.22,
+                        xanchor="left",
+                        x=-0.05,
+                        maxheight=0.05,
+                        font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    ),
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=350,
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    xaxis=dict(title="", showgrid=False, zeroline=False, tickfont=dict(size=11)),
+                    yaxis=dict(title="", showgrid=True, zeroline=False, tickfont=dict(size=11)),
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                )
+
+
+                    # --- Right: Standardized MEV Line Chart ---
+                fig_line = go.Figure()  # <--- ADD THIS LINE HERE, before any conditional logic
+
+                mev_vars = mev_mapping[
+                    (mev_mapping['LOB'] == selected_lob) &
+                    (mev_mapping['StressMethod3'] == stress)
+                ]['Variable'].unique()
+                scenario_key = st.session_state.selected_scenario.split()[0]
+                mev_df = mev_dfs.get(scenario_key)
+
+                standardized_rows = []
+                if mev_df is not None:
+                    mev_vars_found = mev_df[mev_df['Variable'].isin(mev_vars)]
+                    for i, var in enumerate(mev_vars):
+                        row_data = mev_vars_found[mev_vars_found['Variable'] == var]
+                        if not row_data.empty:
+                            y_vals = row_data.iloc[0][mev_x_cols].values.astype(float)
+                            mean = np.mean(y_vals)
+                            std = np.std(y_vals)
+                            if std == 0:
+                                standardized = np.zeros_like(y_vals)
+                            else:
+                                standardized = (y_vals - mean) / std
+                            # Collect rows for download
+                            for q, val in zip(mev_x_cols, standardized):
+                                standardized_rows.append({
+                                    "Variable": var,
+                                    "Quarter": q,
+                                    "Standardized Value": val
+                                })
+                            # Plot as before
+                            fig_line.add_trace(go.Scatter(
+                                x=mev_x_cols,
+                                y=standardized,
+                                mode='lines+markers',
+                                name=var,
+                                line=dict(color=line_palette[i % len(line_palette)], width=2),
+                                marker=dict(size=6)
+                            ))
+                # Create DataFrame for download
+                standardized_df = pd.DataFrame(standardized_rows)
+                fig_line.update_layout(
+                    title=f"(Standardized MEVs)",
+                    xaxis_title="",
+                    yaxis_title="Standardized MEV Value (z-score)",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.22,
+                        xanchor="left",
+                        x=-0.05,
+                        font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    ),
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=350,
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                )
+
+                col_stack, col_line = st.columns(2)
+                with col_stack:
+                    st.plotly_chart(fig_stack, use_container_width=True)
+                    
+                    # --- Comment Box for Stacked Chart ---
+                    comment_key_stack = f"expander2_stack_{st.session_state.selected_quarter}_{selected_lob}_{st.session_state.selected_scenario}_{stress}"
+                    current_comment_stack = st.session_state["comments"].get(comment_key_stack, "")
+                    comment_stack = st.text_area(
+                        f"Add your comment for Stacked Chart: {selected_lob} {st.session_state.selected_quarter} {st.session_state.selected_scenario} {stress}",
+                        value=current_comment_stack,
+                        key=comment_key_stack
+                    )
+                    if comment_stack != current_comment_stack:
+                        st.session_state["comments"][comment_key_stack] = comment_stack
+                        save_comments(st.session_state["comments"])
+
+                    st.download_button(
+                        label=f"Download Stacked Chart Data as Excel",
+                        data=excel_buffer2,
+                        file_name=f"Stacked_Chart_{selected_lob}_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}_{stress}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_stacked_{selected_lob}_{stress}"
+                    )
+
+                with col_line:
+                    st.plotly_chart(fig_line, use_container_width=True)
+                    excel_buffer_standardized = io.BytesIO()
+                    standardized_df.to_excel(excel_buffer_standardized, index=False)
+                    excel_buffer_standardized.seek(0)
+
+                    
+                    # --- Comment Box for Line Chart ---
+                    comment_key_line = f"expander2_line_{st.session_state.selected_quarter}_{selected_lob}_{st.session_state.selected_scenario}_{stress}"
+                    current_comment_line = st.session_state["comments"].get(comment_key_line, "")
+                    comment_line = st.text_area(
+                        f"Add your comment for Line Chart: {selected_lob} {st.session_state.selected_quarter} {st.session_state.selected_scenario} {stress}",
+                        value=current_comment_line,
+                        key=comment_key_line
+                    )
+                    if comment_line != current_comment_line:
+                        st.session_state["comments"][comment_key_line] = comment_line
+                        save_comments(st.session_state["comments"])
+
+                    st.download_button(
+                        label=f"Download MEV Line Chart Data as Excel",
+                        data=excel_buffer_standardized,
+                        file_name=f"MEV_LineChart_{selected_lob}_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}_{stress}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_mev_line_{selected_lob}_{stress}"
+                    )
+
+        # --- Max Value by Mapping Line Chart (No LOB Filter) --
+        filtered_mul_df = mul_df[
+            (mul_df['DATE'] == st.session_state.selected_quarter) &
+            (mul_df['Scenario'] == st.session_state.selected_scenario)
+        ]
+
+        mapping_cols = ['M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                        'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9']
+
+        max_values = []
+        max_mappings = []
+        for col in mapping_cols:
+            idxmax = filtered_mul_df[col].idxmax()
+            max_val = filtered_mul_df.loc[idxmax, col]
+            max_map = filtered_mul_df.loc[idxmax, 'Mapping']
+            max_values.append(max_val)
+            max_mappings.append(max_map)
+
+        unique_mappings = filtered_mul_df['Mapping'].unique()
+        mapping_to_y = {mapping: [np.nan]*len(mapping_cols) for mapping in unique_mappings}
+        for i, mapping in enumerate(max_mappings):
+            mapping_to_y[mapping][i] = max_values[i]
+
+        custom_colors = [
+            "#7f7f7f", "#bcbd22","#8c564b","#e377c2", "#ff7f0e",   "#2ca02c", "#d62728", "#9467bd"
+                ,"#1f77b4" ,"#17becf"
+            ]
+
+        fig_max = go.Figure()
+        for i, mapping in enumerate(unique_mappings):
+            fig_max.add_trace(go.Scatter(
+                x=mapping_cols,
+                y=mapping_to_y[mapping],
+                mode='lines+markers',
+                name=mapping,
+                line=dict(color=custom_colors[i % len(custom_colors)], width=2),
+                marker=dict(size=8, color=custom_colors[i % len(custom_colors)]),
+                connectgaps=False
+            ))
+        fig_max.update_layout(
+            title="",
+            xaxis_title="",
+            yaxis_title="Max Mul",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.22,
+                xanchor="left",
+                x=-0.05,
+                font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+            ),
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=350,
+            plot_bgcolor="#f8fbfd",
+            paper_bgcolor="#f8fbfd",
+            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+        )
+
+
+
+        filtered_mul_df1 = mul_df1[
+            (mul_df1['DATE'] == st.session_state.selected_quarter) &
+            (mul_df1['Scenario'] == st.session_state.selected_scenario)
+        ]
+        
+            
+
+        with st.expander("", expanded=True):
+            # --- First Row: LOB Level Max Mul (full width) ---
+            st.markdown(
+                "<div style='font-size:1.5rem; font-weight:700; color:#17607D; margin-bottom:10px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>LOB Level Max Mul</div>",
+                unsafe_allow_html=True
+            )
+            st.plotly_chart(fig_max, use_container_width=True)
+
+            # --- ADD THIS BLOCK HERE ---
+            comment_key_desk = f"expander3_desk_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}"
+            current_comment_desk = st.session_state["comments"].get(comment_key_desk, "")
+            comment_desk = st.text_area(
+                f"Add your comment for Desk Level Max Mul: {st.session_state.selected_quarter} {st.session_state.selected_scenario}",
+                value=current_comment_desk,
+                key=comment_key_desk
+            )
+            if comment_desk != current_comment_desk:
+                st.session_state["comments"][comment_key_desk] = comment_desk
+                save_comments(st.session_state["comments"])
+                
+            # --- Second Row: Desk Level Max Mul (side by side) ---
+            st.markdown(
+                "<div style='font-size:1.3rem; font-weight:700; color:#17607D; margin-bottom:10px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>Desk Level Max Mul</div>",
+                unsafe_allow_html=True
+            )
+
+            # Prepare desk-level charts
+            mapping_cols = [
+                'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+            ]
+            custom_colors = [
+                "#7f7f7f", "#bcbd22","#8c564b","#e377c2", "#ff7f0e",   "#2ca02c", "#d62728", "#9467bd"
+                ,"#1f77b4" ,"#17becf"
+            ]
+            unique_lobs = filtered_mul_df1['LOB'].unique()
+
+            # Only show two desk charts side by side (if more, you can adjust logic)
+            desk_charts = []
+            for lob in unique_lobs:
+                lob_df = filtered_mul_df1[filtered_mul_df1['LOB'] == lob]
+                max_values = []
+                max_mappings = []
+                for col in mapping_cols:
+                    idxmax = lob_df[col].idxmax()
+                    if pd.isna(idxmax):
+                        max_val = np.nan
+                        max_map = None
+                    else:
+                        max_val = lob_df.loc[idxmax, col]
+                        max_map = lob_df.loc[idxmax, 'Mapping']
+                    max_values.append(max_val)
+                    max_mappings.append(max_map)
+
+                unique_mappings = lob_df['Mapping'].unique()
+                mapping_to_y = {mapping: [np.nan]*len(mapping_cols) for mapping in unique_mappings}
+                for i, mapping in enumerate(max_mappings):
+                    if mapping is not None:
+                        mapping_to_y[mapping][i] = max_values[i]
+
+                fig = go.Figure()
+                for i, mapping in enumerate(unique_mappings):
+                    fig.add_trace(go.Scatter(
+                        x=mapping_cols,
+                        y=mapping_to_y[mapping],
+                        mode='lines+markers',
+                        name=mapping,
+                        line=dict(color=custom_colors[i % len(custom_colors)], width=2),
+                        marker=dict(size=8, color=custom_colors[i % len(custom_colors)]),
+                        connectgaps=False
+                    ))
+                fig.update_layout(
+                    title=f"{lob}",
+                    xaxis_title="",
+                    yaxis_title="Max Mul",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.25,
+                        xanchor="left",
+                        x=-0.05,maxheight=0.005,
+                        font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    ),
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=370,
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                )
+                desk_charts.append((lob, fig))
+                
+                
+
+            # Display only the first two desk charts side by side--
+            if len(desk_charts) >= 2:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"<div style='font-size:1.1rem; font-weight:600; color:#17607D; margin-bottom:6px;'></div>", unsafe_allow_html=True)
+                    st.plotly_chart(desk_charts[0][1], use_container_width=True)
+                    # --- Comment Box for Desk Chart 1 ---
+                    lob_name_1 = desk_charts[0][0]
+                    comment_key_line1 = f"expander3_line_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}_{lob_name_1}"
+                    current_comment_line1 = st.session_state["comments"].get(comment_key_line1, "")
+                    comment_line1 = st.text_area(
+                        f"Add your comment for Desk Line Chart: {lob_name_1} {st.session_state.selected_quarter} {st.session_state.selected_scenario}",
+                        value=current_comment_line1,
+                        key=comment_key_line1
+                    )
+                    if comment_line1 != current_comment_line1:
+                        st.session_state["comments"][comment_key_line1] = comment_line1
+                        save_comments(st.session_state["comments"])
+
+                with col2:
+                    st.markdown(f"<div style='font-size:1.1rem; font-weight:600; color:#17607D; margin-bottom:6px;'></div>", unsafe_allow_html=True)
+                    st.plotly_chart(desk_charts[1][1], use_container_width=True)
+                    # --- Comment Box for Desk Chart 2 ---
+                    lob_name_2 = desk_charts[1][0]
+                    comment_key_line2 = f"expander3_line_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}_{lob_name_2}"
+                    current_comment_line2 = st.session_state["comments"].get(comment_key_line2, "")
+                    comment_line2 = st.text_area(
+                        f"Add your comment for Desk Line Chart: {lob_name_2} {st.session_state.selected_quarter} {st.session_state.selected_scenario}",
+                        value=current_comment_line2,
+                        key=comment_key_line2
+                    )
+                    if comment_line2 != current_comment_line2:
+                        st.session_state["comments"][comment_key_line2] = comment_line2
+                        save_comments(st.session_state["comments"])
+
+            elif len(desk_charts) == 1:
+                st.markdown(f"<div style='font-size:1.1rem; font-weight:600; color:#17607D; margin-bottom:6px;'></div>", unsafe_allow_html=True)
+                st.plotly_chart(desk_charts[0][1], use_container_width=True)
+                # --- Comment Box for Desk Chart 1 ---
+                lob_name_1 = desk_charts[0][0]
+                comment_key_line1 = f"expander3_line_{st.session_state.selected_quarter}_{st.session_state.selected_scenario}_{lob_name_1}"
+                current_comment_line1 = st.session_state["comments"].get(comment_key_line1, "")
+                comment_line1 = st.text_area(
+                    f"Add your comment for Desk Line Chart: {lob_name_1} {st.session_state.selected_quarter} {st.session_state.selected_scenario}",
+                    value=current_comment_line1,
+                    key=comment_key_line1
+                )
+                if comment_line1 != current_comment_line1:
+                    st.session_state["comments"][comment_key_line1] = comment_line1
+                    save_comments(st.session_state["comments"])
+        
+        with st.expander("", expanded=True):
+            st.markdown(
+                "<div style='font-size:1.2rem; font-weight:700; color:#17607D; margin-bottom:0px;'>MEV</div>",
+                unsafe_allow_html=True
+            )
+           
+            # Multi-select for variables from MEV Mapping
+            all_variables = mev_mapping['Variable'].drop_duplicates().sort_values().tolist()
+            selected_variables = st.multiselect(
+                "Selection",
+                options=all_variables,
+                default=all_variables[:3],  # Default: first 3 variables, adjust as needed--
+                key="variable_linechart_select_tab1"
+            )
+
+            # Prepare x-axis columns (time columns)
+            sample_mev_df = list(mev_dfs.values())[0]
+            mev_x_cols = [col for col in sample_mev_df.columns if str(col).startswith('M') or str(col).startswith('Q')]
+
+            scenario_key = st.session_state.selected_scenario
+            period1 = st.session_state.selected_quarter
+
+            mev_df = mev_dfs.get(scenario_key)
+            line_palette = [
+                "#7f7f7f", "#bcbd22","#8c564b","#e377c2", "#a85207",   "#2ca02c", "#d62728", "#9467bd"
+                ,"#1f77b4" ,"#17becf"
+            ]
+
+            # Show up to 3 charts per row--
+
+            for i in range(0, len(selected_variables), 3):
+                cols = st.columns(3)
+                for j in range(3):
+                    if i + j < len(selected_variables):
+                        var = selected_variables[i + j]
+                        fig = go.Figure()
+                        # Period 1 (solid)
+                        row1 = mev_df[
+                            (mev_df['DATE'] == period1) &
+                            (mev_df['Scenario'] == scenario_key) &
+                            (mev_df['Variable'] == var)
+                        ]
+                        if not row1.empty:
+                            y1 = row1.iloc[0][mev_x_cols].values.astype(float)
+                            fig.add_trace(go.Scatter(
+                                x=mev_x_cols,
+                                y=y1,
+                                mode='lines+markers',
+                                name=f"{var} ({period1})",
+                                line=dict(color=line_palette[(i + j) % len(line_palette)], width=2, dash='solid'),
+                                marker=dict(size=5),
+                                legendgroup=var,
+                                showlegend=True
+                            ))
+                        fig.update_layout(
+                            title=f"{var}",
+                            xaxis_title="",
+                            yaxis_title="Value",
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=-0.25,
+                                xanchor="left",
+                                x=0,
+                                maxheight=0.05,
+                                font=dict(size=11, family="Montserrat, Segoe UI, Arial, sans-serif")
+                            ),
+                            margin=dict(l=10, r=10, t=30, b=10),
+                            height=400,
+                            plot_bgcolor="#f8fbfd",
+                            paper_bgcolor="#f8fbfd",
+                            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                        )
+                        with cols[j]:
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                key=f"plotly_chart_tab1_{var}_{i}_{j}_{period1}"
+                            )                
+
+    with tabs[1]:
+        # --- Use sidebar filters for period selection ---
+        period1 = st.session_state.selected_quarter
+        period2 = st.session_state.selected_period2
+
+        # --- Calculate Peak Value and Quarter for Period 1 ---
+        filtered_first_df_period1 = first_df[
+            (first_df['DATE'] == period1) &
+            (first_df['Scenario'] == st.session_state.selected_scenario)
+        ]
+        grand_total_row_period1 = filtered_first_df_period1[filtered_first_df_period1['LOB'] == 'Grand Total']
+        quarter_cols = ['Base','Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9']
+
+        if not grand_total_row_period1.empty:
+            quarter_values_period1 = grand_total_row_period1[quarter_cols].iloc[0]
+            va_max_period1 = quarter_values_period1.max()
+            va_max_quarter_period1 = quarter_values_period1.idxmax()
+            va_9q_period1 = grand_total_row_period1['Q9'].values[0]
+        else:
+            va_max_period1 = None
+            va_max_quarter_period1 = None
+            va_9q_period1 = None
+
+        # --- Calculate Peak Value and Quarter for Period 2 ---
+        filtered_first_df_period2 = first_df[
+            (first_df['DATE'] == period2) &
+            (first_df['Scenario'] == st.session_state.selected_scenario)
+        ]
+        grand_total_row_period2 = filtered_first_df_period2[filtered_first_df_period2['LOB'] == 'Grand Total']
+
+        if not grand_total_row_period2.empty:
+            quarter_values_period2 = grand_total_row_period2[quarter_cols].iloc[0]
+            va_max_period2 = quarter_values_period2.max()
+            va_max_quarter_period2 = quarter_values_period2.idxmax()
+            va_9q_period2 = grand_total_row_period2['Q9'].values[0]
+        else:
+            va_max_period2 = None
+            va_max_quarter_period2 = None
+            va_9q_period2 = None
+
+    
+
+        # Bar chart data
+        period_labels = [
+            f"Period 1 ({va_max_quarter_period1})" if va_max_quarter_period1 else "Period 1",
+            f"Period 2 ({va_max_quarter_period2})" if va_max_quarter_period2 else "Period 2",
+            "Difference (P1 - P2)"
+        ]
+        peak_values = [va_max_period1, va_max_period2, va_max_period1 - va_max_period2 if (va_max_period1 is not None and va_max_period2 is not None) else None]
+        q9_values = [va_9q_period1, va_9q_period2, va_9q_period1 - va_9q_period2 if (va_9q_period1 is not None and va_9q_period2 is not None) else None]
+        peak_text = [
+            f"${va_max_period1:.2f}MM" if va_max_period1 is not None else "N/A",
+            f"${va_max_period2:.2f}MM" if va_max_period2 is not None else "N/A",
+            f"${(va_max_period1 - va_max_period2):.2f}MM" if (va_max_period1 is not None and va_max_period2 is not None) else "N/A"
+        ]
+        q9_text = [
+            f"${va_9q_period1:.2f}MM" if va_9q_period1 is not None else "N/A",
+            f"${va_9q_period2:.2f}MM" if va_9q_period2 is not None else "N/A",
+            f"${(va_9q_period1 - va_9q_period2):.2f}MM" if (va_9q_period1 is not None and va_9q_period2 is not None) else "N/A"
+        ]
+
+        blue_palette = ["#17607D", "#E4EFFC"] 
+
+
+
+        color_peak = blue_palette[0]  # e.g. "#17607D"
+        color_q9 = blue_palette[1]    # e.g. "#E4EFFC"
+
+        fig_peak = make_subplots(specs=[[{"secondary_y": True}]])
+
+        # Peak Value Bars (primary y, both periods)
+        fig_peak.add_trace(
+            go.Bar(
+                x=period_labels[:2],
+                y=peak_values[:2],
+                name="Peak Value",
+                text=peak_text[:2],
+                textposition='inside',
+                insidetextanchor='middle',
+                marker=dict(color=color_peak),
+                width=0.35,
+                textfont=dict(size=12, color='white', family="Montserrat, Segoe UI, Arial, sans-serif"),
+            ),
+            secondary_y=False,
+        )
+
+        # 9Q Value Bars (primary y, both periods)
+        fig_peak.add_trace(
+            go.Bar(
+                x=period_labels[:2],
+                y=q9_values[:2],
+                name="9Q Value",
+                text=q9_text[:2],
+                textposition='inside',
+                insidetextanchor='middle',
+                marker=dict(color=color_q9),
+                width=0.35,
+                textfont=dict(size=12, color='black', family="Montserrat, Segoe UI, Arial, sans-serif"),
+            ),
+            secondary_y=False,
+        )
+
+        # Peak Difference Bar (secondary y)
+        fig_peak.add_trace(
+            go.Bar(
+                x=[period_labels[2]],
+                y=[peak_values[2]],
+                name="Peak Diff (P1-P2)",
+                text=[peak_text[2]],
+                textposition='inside',
+                insidetextanchor='middle',
+                marker=dict(color=color_peak),
+                width=0.35,
+                textfont=dict(size=12, color='white', family="Montserrat, Segoe UI, Arial, sans-serif"),
+            ),
+            secondary_y=True,
+        )
+
+        # 9Q Difference Bar (secondary y)
+        fig_peak.add_trace(
+            go.Bar(
+                x=[period_labels[2]],
+                y=[q9_values[2]],
+                name="9Q Diff (P1-P2)",
+                text=[q9_text[2]],
+                textposition='inside',
+                insidetextanchor='middle',
+                marker=dict(color=color_q9),
+                width=0.35,
+                textfont=dict(size=12, color='black', family="Montserrat, Segoe UI, Arial, sans-serif"),
+            ),
+            secondary_y=True,
+        )
+
+
+        fig_peak.update_layout(
+            barmode='group',
+            bargap=0.15,
+            bargroupgap=0.0,
+            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=13),
+            height=340,
+            margin=dict(l=20, r=20, t=60, b=30),
+            plot_bgcolor="#f8fbfd",
+            paper_bgcolor="#f8fbfd",
+            showlegend=True,
+            xaxis=dict(
+                title=dict(
+                    text="",
+                    font=dict(size=16, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif")
+                ),
+                tickfont=dict(size=14, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif"),
+                showline=False,
+                showgrid=False,
+                zeroline=False,
+            ),
+        )
+        fig_peak.update_yaxes(
+            title_text="Valuation Adjustment (MM)", 
+            secondary_y=False,
+            showgrid=True,
+            gridcolor='rgba(23,96,125,0.08)',
+            zeroline=False,
+        )
+        fig_peak.update_yaxes(
+            title_text="Difference (P1 - P2)", 
+            secondary_y=True,
+            showgrid=False,
+            zeroline=False,
+        )
+
+        # Make value labels bold and add a dark outline for contrast
+        for i, trace in enumerate(fig_peak.data):
+            # Peak bars (white label)
+            if i in [0, 2]:
+                trace.texttemplate = "<span style='font-weight:700;text-shadow:1px 1px 2px #0D3C55; color:white'>%{text}</span>"
+            # 9Q bars (black label)
+            else:
+                trace.texttemplate = "<span style='font-weight:700;text-shadow:1px 1px 2px #0D3C55; color:black'>%{text}</span>"
+
+
+        fig_peak.update_layout(
+            title={
+                'text': "",
+                'font': dict(size=22, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif"),
+                'x': 0.01,
+                'xanchor': 'left'
+            },
+            xaxis=dict(
+                title=dict(
+                    text="",
+                    font=dict(size=16, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif")
+                ),
+                tickfont=dict(size=14, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif"),
+                showline=False,
+                showgrid=False,
+                zeroline=False,
+            ),
+            yaxis=dict(
+                title=dict(
+                    text="Valuation Adjustment (MM)",
+                    font=dict(size=16, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif")
+                ),
+                tickfont=dict(size=14, color='#17607D', family="Montserrat, Segoe UI, Arial, sans-serif"),
+                showgrid=True,
+                gridcolor='rgba(23,96,125,0.08)',
+                zeroline=False,
+            ),
+            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=13),
+            height=340,
+            margin=dict(l=20, r=20, t=60, b=30),
+            plot_bgcolor="#f8fbfd",
+            paper_bgcolor="#f8fbfd",
+            showlegend=False,  # <--- Remove legend
+            barmode='group',
+            bargap=0.15,
+            bargroupgap=0.0,
+            annotations=[
+                dict(
+                    text="",
+                    x=0.01,
+                    y=1.13,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    font=dict(size=14, color="#3498DB", family="Montserrat, Segoe UI, Arial, sans-serif"),
+                )
+            ]
+        )
+        # Make value labels bold and add a dark outline for contrast--
+
+        for trace in fig_peak.data:
+            trace.texttemplate = "<span style='font-weight:700;text-shadow:1px 1px 2px #0D3C55;'>%{text}</span>"
+        
+        st.markdown("""
+            <style>
+            /* Make expander border thinner and lighter */
+            div[data-testid="stExpander"] {
+                border: 1px solid #dbeaf5 !important;  /* thinner and lighter */
+                box-shadow: none !important;
+            }
+            div[data-testid="stExpander"] > div {
+                border-bottom: 1px solid #dbeaf5 !important; /* thinner bottom border */
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        # Prepare LOB stacked area chart data for both periods-
+        
+        def get_lob_stacked_data(df, period_label):
+            lob_group = df[df['LOB'] != 'Grand Total'].groupby('LOB')[quarter_cols].sum()
+            # Add difference columns
+            lob_group['Q1-Base'] = lob_group['Q1'] - lob_group['Base']
+            lob_group['Q2-Q1'] = lob_group['Q2'] - lob_group['Q1']
+            lob_group['Q3-Q2'] = lob_group['Q3'] - lob_group['Q2']
+            lob_group['Q4-Q3'] = lob_group['Q4'] - lob_group['Q3']
+            lob_group['Q5-Q4'] = lob_group['Q5'] - lob_group['Q4']
+            lob_group['Q6-Q5'] = lob_group['Q6'] - lob_group['Q5']
+            lob_group['Q7-Q6'] = lob_group['Q7'] - lob_group['Q6']
+            lob_group['Q8-Q7'] = lob_group['Q8'] - lob_group['Q7']
+            lob_group['Q9-Q8'] = lob_group['Q9'] - lob_group['Q8']
+            lob_group['Period'] = period_label
+            return lob_group.reset_index()
+
+        lob_stacked_period1 = get_lob_stacked_data(filtered_first_df_period1, "Period 1")
+        lob_stacked_period2 = get_lob_stacked_data(filtered_first_df_period2, "Period 2")
+        combined_lob_stacked = pd.concat([lob_stacked_period1, lob_stacked_period2])
+
+        
+        with st.expander("", expanded=True):
+            col_peak, col_line = st.columns([0.5, 1])
+            with col_peak:
+                st.markdown(
+                    "<div style='font-size:1.3rem; font-weight:700; color:#17607D; margin-bottom:50px;margin-top:26px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>VA Comparison</div>",
+                    unsafe_allow_html=True
+                )
+                fig_peak.update_layout(margin=dict(l=20, r=20, t=10, b=30))
+                st.plotly_chart(fig_peak, use_container_width=True)
+
+
+                
+            def get_grand_total_line(df):
+                grand_total = df[df['LOB'] == 'Grand Total']
+                if grand_total.empty:
+                    return [np.nan]*10
+                base = grand_total['Base'].values[0]
+                q1 = grand_total['Q1'].values[0]
+                q2 = grand_total['Q2'].values[0]
+                q3 = grand_total['Q3'].values[0]
+                q4 = grand_total['Q4'].values[0]
+                q5 = grand_total['Q5'].values[0]
+                q6 = grand_total['Q6'].values[0]
+                q7 = grand_total['Q7'].values[0]
+                q8 = grand_total['Q8'].values[0]
+                q9 = grand_total['Q9'].values[0]
+                # Start at zero for base, then cumulative sum of differences
+                y_line = [0]
+                y_line.append(q1 - base)
+                y_line.append(q2 - q1)
+                y_line.append(q3 - q2)
+                y_line.append(q4 - q3)
+                y_line.append(q5 - q4)
+                y_line.append(q6 - q5)
+                y_line.append(q7 - q6)
+                y_line.append(q8 - q7)
+                y_line.append(q9 - q8)
+                return y_line
+                        
+
+            grand_total_line_period1 = get_grand_total_line(filtered_first_df_period1)
+            grand_total_line_period2 = get_grand_total_line(filtered_first_df_period2)
+
+            with col_line:
+                # Create two columns for header and dropdown
+                header_col, dropdown_col = st.columns([1, 2])
+
+                with header_col:
+                    st.markdown(
+                        "<div style='font-size:1.2rem; font-weight:700; color:#17607D; margin-bottom:0px; margin-top:27px;'>Most Influential MEVs by Desk </div>",
+                        unsafe_allow_html=True
+                    )
+
+                with dropdown_col:
+                    valid_stress = set(mev_param_df['StressMethod3']).intersection(set(mev_final_df['stressmethod3']))
+                    unique_stress = [s for s in mev_mapping['StressMethod3'].dropna().unique() if s in valid_stress]
+                    selected_stress = st.multiselect(
+                        "",
+                        options=unique_stress,
+                        default=unique_stress[:1] if unique_stress else [],
+                        key="stressmethod3_influence_select_tab2"
+                    )
+
+                # Time columns for MEV files (as strings)
+                sample_mev_df = list(mev_dfs.values())[0]
+                time_cols = [col for col in sample_mev_df.columns if str(col).startswith('M') or str(col).startswith('Q')]
+                time_cols_no_m1 = [col for col in time_cols if col != 'M1']
+
+                scenario = st.session_state.selected_scenario
+                date = st.session_state.selected_quarter
+
+                if selected_stress:
+                    cols = st.columns(len(selected_stress))
+                    for idx, stress in enumerate(selected_stress):
+                        with cols[idx]:
+                            # Step 2: Get mapped variables
+                            mapped_vars = mev_mapping[mev_mapping['StressMethod3'] == stress]['Variable'].unique()
+                            mev_df = mev_dfs.get(scenario)
+
+                            # --- Calculate for Period 1 ---
+                            base_var_values_p1 = {}
+                            for var in mapped_vars:
+                                row_p1 = mev_df[
+                                    (mev_df['DATE'] == period1) &
+                                    (mev_df['Scenario'] == scenario) &
+                                    (mev_df['Variable'] == var)
+                                ]
+                                if not row_p1.empty:
+                                    base_var_values_p1[var] = np.array([row_p1.iloc[0][col] for col in time_cols])
+                                else:
+                                    base_var_values_p1[var] = np.zeros(len(time_cols))
+
+                            # --- Calculate for Period 2 ---
+                            base_var_values_p2 = {}
+                            for var in mapped_vars:
+                                row_p2 = mev_df[
+                                    (mev_df['DATE'] == period2) &
+                                    (mev_df['Scenario'] == scenario) &
+                                    (mev_df['Variable'] == var)
+                                ]
+                                if not row_p2.empty:
+                                    base_var_values_p2[var] = np.array([row_p2.iloc[0][col] for col in time_cols])
+                                else:
+                                    base_var_values_p2[var] = np.zeros(len(time_cols))
+
+                            # --- Transform and Standardize for both periods ---
+                            def transform_and_standardize(base_var_values):
+                                transformed_vars = {}
+                                for var in mapped_vars:
+                                    arr = base_var_values[var]
+                                    transformed_vars[var] = arr
+                                    transformed_vars[var + '_diff1'] = np.array([arr[i] - arr[i-1] if i > 0 else arr[i] for i in range(len(arr))])
+                                    transformed_vars[var + '_lag1'] = np.array([arr[i-1] if i > 0 else arr[0] for i in range(len(arr))])
+                                # Only keep model_mevs
+                                model_mevs = mev_param_df[mev_param_df['StressMethod3'] == stress]['MEV_final'].unique()
+                                used_vars = {mev: transformed_vars[mev] for mev in model_mevs if mev in transformed_vars}
+                                # Standardize
+                                standardized_vars = {}
+                                for mev in used_vars:
+                                    arr = used_vars[mev]
+                                    param_row = mev_param_df[(mev_param_df['StressMethod3'] == stress) & (mev_param_df['MEV_final'] == mev)]
+                                    mean = param_row['mean'].values[0] if not param_row.empty else 0
+                                    std = param_row['std'].values[0] if not param_row.empty else 1
+                                    standardized = (arr - mean) / std if std != 0 else arr
+                                    standardized_vars[mev] = standardized
+                                return standardized_vars
+
+                            standardized_vars_p1 = transform_and_standardize(base_var_values_p1)
+                            standardized_vars_p2 = transform_and_standardize(base_var_values_p2)
+
+                            # --- Influence calculation for both periods ---
+                            def calc_influence(standardized_vars):
+                                n_periods = len(time_cols)
+                                n_periods_no_m1 = len(time_cols_no_m1)
+                                m1_idx = time_cols.index('M1') if 'M1' in time_cols else 0
+                                model_terms = mev_final_df[mev_final_df['stressmethod3'] == stress][['mev', 'un standerdized variable_mult']].values
+                                influence_scores = {}
+                                for mev in standardized_vars:
+                                    infl = np.zeros(n_periods)
+                                    for term, coef in model_terms:
+                                        term = str(term)
+                                        if term.lower() == 'constant':
+                                            continue
+                                        if '*' in term:
+                                            parts = [p.strip() for p in term.split('*')]
+                                            if mev in parts and all(p in standardized_vars for p in parts):
+                                                val = standardized_vars[mev] * 1
+                                                infl += coef * val
+                                        elif '^2' in term:
+                                            base = term.replace('^2', '').strip()
+                                            if mev == base and mev in standardized_vars:
+                                                infl += coef * (standardized_vars[mev] ** 2)
+                                        elif term == mev:
+                                            infl += coef * standardized_vars[mev]
+                                    infl_no_m1 = np.delete(infl, m1_idx)
+                                    influence_scores[mev] = np.mean(np.abs(infl_no_m1)) if n_periods_no_m1 > 0 else 0
+                                return influence_scores
+
+                            influence_scores_p1 = calc_influence(standardized_vars_p1)
+                            influence_scores_p2 = calc_influence(standardized_vars_p2)
+
+                            # --- Display both influences ---
+                            if influence_scores_p1 and influence_scores_p2:
+                                top_mev_p1 = max(influence_scores_p1, key=influence_scores_p1.get)
+                                top_score_p1 = influence_scores_p1[top_mev_p1]
+                                top_mev_p2 = max(influence_scores_p2, key=influence_scores_p2.get)
+                                top_score_p2 = influence_scores_p2[top_mev_p2]
+                                st.markdown(
+                                    f"<div style='font-size:1.1rem; color:#17607D; font-weight:600;'>Desk: <b>{stress}</b></div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f"<div style='font-size:1rem; color:#333;'>Most Influential MEV: <b>{top_mev_p1}</b> (Avg Influence: <b>P1: {top_score_p1:.2f} & P2: {top_score_p2:.2f}</b>)</div>",
+                                    unsafe_allow_html=True
+                                )
+                                # Plot for period 1 (or both if you want)
+                                fig = go.Figure()
+                                base_var_name = top_mev_p1.replace('_diff1', '').replace('_lag1', '').replace('^2', '').split('*')[0].strip()
+                                arr = base_var_values_p1.get(base_var_name, np.zeros(len(time_cols)))
+                                fig.add_trace(go.Scatter(
+                                    x=time_cols,
+                                    y=arr,
+                                    mode='lines+markers',
+                                    name=base_var_name,
+                                    line=dict(color="#17607D", width=2),
+                                    marker=dict(size=6)
+                                ))
+                                fig.update_layout(
+                                    title=f"",
+                                    xaxis_title="",
+                                    yaxis_title="Value",
+                                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11),
+                                    plot_bgcolor="#f8fbfd",
+                                    paper_bgcolor="#f8fbfd",
+                                    height=300,
+                                    margin=dict(l=10, r=10, t=30, b=10)
+                                )
+                                st.plotly_chart(fig, use_container_width=True, key=f"plotly_chart_{stress}_{scenario}_{period1}")
+                            else:
+                                st.info("No influential MEV found for the selected StressMethod3.")
+                                
+
+
+
+
+
+        with st.expander("", expanded=True):    
+            col_charts, col_comments=st.columns([1,0.5])
+            with col_charts:
+                stack_palette = [
+                    "#3D5A80", "#B5838D", "#F4D35E", "#E07A5F", "#43AA8B", "#993773", "#2C156B", "#00BFFF", "#800080", "#FF8C00", "#B36494" ,"#9B5DE5", "#A1C181",  "#F3722C", "#9BC1DB", "#9C0B0B", "#068006", "#0081A7", "#90BE6D", "#B7E1F3", "#577590"]
+        
+                # --- Define x-axis ---
+                x_axis = ['Base', 'Base-Q1', 'Q2-Q1', 'Q3-Q2', 'Q4-Q3', 'Q5-Q4', 'Q6-Q5', 'Q7-Q6', 'Q8-Q7', 'Q9-Q8']
+
+                # --- Prepare stacked chart data ---
+                def get_stress_stacked_data(df, period_label):
+                    data = []
+                    stress_methods = df['StressMethod3'].dropna().unique()
+                    stress_methods = sorted(stress_methods)
+                    for stress in stress_methods:
+                        row = df[df['StressMethod3'] == stress]
+                        # For stacked chart: first value is 0, then differences
+                        base = row['Base'].sum() if not row.empty else 0
+                        q1 = row['Q1'].sum() if not row.empty else 0
+                        q2 = row['Q2'].sum() if not row.empty else 0
+                        q3 = row['Q3'].sum() if not row.empty else 0
+                        q4 = row['Q4'].sum() if not row.empty else 0
+                        q5 = row['Q5'].sum() if not row.empty else 0
+                        q6 = row['Q6'].sum() if not row.empty else 0
+                        q7 = row['Q7'].sum() if not row.empty else 0
+                        q8 = row['Q8'].sum() if not row.empty else 0
+                        q9 = row['Q9'].sum() if not row.empty else 0
+                        values = [
+                            0,                # Base-
+                            q1 - base,        # Base-Q1
+                            q2 - q1,          # Q2-Q1
+                            q3 - q2,          # Q3-Q2
+                            q4 - q3,          # Q4-Q3
+                            q5 - q4,          # Q5-Q4
+                            q6 - q5,          # Q6-Q5
+                            q7 - q6,          # Q7-Q6
+                            q8 - q7,          # Q8-Q7
+                            q9 - q8           # Q9-Q8
+                        ]
+                        for x, val in zip(x_axis, values):
+                            data.append({'StressMethod3': stress, 'Quarter': x, 'Value': val, 'Period': period_label})
+                    return pd.DataFrame(data)
+
+                df_period1 = get_stress_stacked_data(filtered_first_df_period1, "Period 1")
+                df_period2 = get_stress_stacked_data(filtered_first_df_period2, "Period 2")
+                combined_df = pd.concat([df_period1, df_period2])
+
+                # 1.Calculate total magnitude for each StressMethod3 (across all periods and quarters)----
+                stress_totals = (
+                    combined_df.groupby('StressMethod3')['Value']
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                stress_methods = stress_totals.index.tolist()
+                periods = ["Period 1", "Period 2"]
+
+                fig_stack = make_subplots(specs=[[{"secondary_y": True}]])
+                for period in periods:
+                    for i, stress in enumerate(stress_methods):
+                        df_plot = combined_df[(combined_df['StressMethod3'] == stress) & (combined_df['Period'] == period)]
+                        color = stack_palette[i % len(stack_palette)]
+                        y_vals = df_plot['Value'].values
+                        fig_stack.add_trace(go.Bar(
+                            x=x_axis,
+                            y=y_vals,
+                            name=f"{stress}",
+                            offsetgroup=period,
+                            legendgroup=stress,
+                            marker=dict(color=color),
+                            showlegend=(period == periods[0])
+                        ),
+                        secondary_y=False, )
+                       
+                def get_grand_total_line(df):
+                    grand_total = df[df['LOB'] == 'Grand Total']
+                    if grand_total.empty:
+                        return [np.nan]*10
+                    base = grand_total['Base'].values[0]
+                    q1 = grand_total['Q1'].values[0]
+                    q2 = grand_total['Q2'].values[0]
+                    q3 = grand_total['Q3'].values[0]
+                    q4 = grand_total['Q4'].values[0]
+                    q5 = grand_total['Q5'].values[0]
+                    q6 = grand_total['Q6'].values[0]
+                    q7 = grand_total['Q7'].values[0]
+                    q8 = grand_total['Q8'].values[0]
+                    q9 = grand_total['Q9'].values[0]
+                    # For line chart: direct values
+                    return [base, q1, q2, q3, q4, q5, q6, q7, q8, q9]
+
+                grand_total_line_period1 = get_grand_total_line(filtered_first_df_period1)
+                grand_total_line_period2 = get_grand_total_line(filtered_first_df_period2)
+
+                ## Add invisible dummy trace at y=0 to force axis to show zero
+                fig_stack.add_trace(go.Scatter(
+                    x=[x_axis[0]],
+                    y=[0],
+                    mode='markers',
+                    marker=dict(color='rgba(0,0,0,0)'),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ), secondary_y=True)
+
+                fig_stack.add_trace(go.Scatter(
+                    x=x_axis,
+                    y=grand_total_line_period1,
+                    mode='lines+markers',
+                    name='Grand Total (Period 1)',
+                    line=dict(color='#17607D', width=3, dash='solid'),
+                    marker=dict(size=5, color='#17607D'),
+                    showlegend=True
+                ), secondary_y=True)
+
+                fig_stack.add_trace(go.Scatter(
+                    x=x_axis,
+                    y=grand_total_line_period2,
+                    mode='lines+markers',
+                    name='Grand Total (Period 2)',
+                    line=dict(color='#43AA8B', width=3, dash='dash'),
+                    marker=dict(size=5, color='#43AA8B'),
+                    showlegend=True
+                ), secondary_y=True)
+
+
+    
+                fig_stack.update_layout(
+                    barmode='relative',
+                    bargap=0.2,
+                    bargroupgap=0.05,
+                    title="",
+                    xaxis=dict(
+                        title="", 
+                        categoryorder='array', 
+                        categoryarray=x_axis,
+                        automargin=True
+                    ),
+                    yaxis=dict(
+                        title="Value",
+                        automargin=True
+                    ),
+                    yaxis2=dict(  # <-- ADD THIS BLOCK
+                        title="Grand Total Line",
+                        range=[0, None],  # <-- This forces the secondary y-axis to start at zero
+                        overlaying='y',   # <-- Ensures y2 overlays y
+                        side='right',     # <-- Places y2 on the right
+                        automargin=True
+                    ),
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=12),
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    height=450,
+                    width=800,
+                    margin=dict(l=30, r=30, t=30, b=40),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.25,
+                        xanchor="left",
+                        x=0,
+                        maxheight=0.08,
+                        font=dict(size=12, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    )
+                )
+
+                fig_stack.update_yaxes(title_text="Stacked Value", secondary_y=False)
+
+
+                st.markdown(
+                    f"<div style='font-size:1.3rem; font-weight:700; color:#17607D; margin-bottom:0.02px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>({period1} vs {period2})</div>",
+                    unsafe_allow_html=True
+                )
+                st.plotly_chart(fig_stack, use_container_width=True, key=f"{period1}_{period2}")
+                st.markdown("<div style='height:2px;'></div>", unsafe_allow_html=True)  # Spacer
+
+
+                
+
+                stack_palette = [
+                    "#3D5A80", "#B5838D", "#F4D35E", "#E07A5F", "#43AA8B", "#993773", "#2C156B", "#00BFFF", "#800080", "#FF8C00", "#B36494" ,"#9B5DE5", "#A1C181",  "#F3722C", "#9BC1DB", "#9C0B0B", "#068006", "#0081A7", "#90BE6D", "#B7E1F3", "#577590"
+                    ]
+
+                x_axis = ['Base', 'Base-Q1', 'Q2-Q1', 'Q3-Q2', 'Q4-Q3', 'Q5-Q4', 'Q6-Q5', 'Q7-Q6', 'Q8-Q7', 'Q9-Q8']
+
+                def get_lob_stacked_data_for_chart(df, period_label):
+                    data = []
+                    lobs = df['LOB'].unique()
+                    for lob in lobs:
+                        row = df[df['LOB'] == lob]
+                        base = row['Base'].sum() if not row.empty else 0
+                        q1 = row['Q1'].sum() if not row.empty else 0
+                        q2 = row['Q2'].sum() if not row.empty else 0
+                        q3 = row['Q3'].sum() if not row.empty else 0
+                        q4 = row['Q4'].sum() if not row.empty else 0
+                        q5 = row['Q5'].sum() if not row.empty else 0
+                        q6 = row['Q6'].sum() if not row.empty else 0
+                        q7 = row['Q7'].sum() if not row.empty else 0
+                        q8 = row['Q8'].sum() if not row.empty else 0
+                        q9 = row['Q9'].sum() if not row.empty else 0
+                        values = [
+                            0,                # Base 
+                            q1 - base,        # Base-Q1
+                            q2 - q1,          # Q2-Q1
+                            q3 - q2,          # Q3-Q2
+                            q4 - q3,          # Q4-Q3
+                            q5 - q4,          # Q5-Q4
+                            q6 - q5,          # Q6-Q5
+                            q7 - q6,          # Q7-Q6
+                            q8 - q7,          # Q8-Q7
+                            q9 - q8           # Q9-Q8
+                        ]
+                        for x, val in zip(x_axis, values):
+                            data.append({'LOB': lob, 'Quarter': x, 'Value': val, 'Period': period_label})
+                    return pd.DataFrame(data)
+
+                df_lob_period1 = get_lob_stacked_data_for_chart(filtered_first_df_period1, "Period 1")
+                df_lob_period2 = get_lob_stacked_data_for_chart(filtered_first_df_period2, "Period 2")
+                combined_lob_df = pd.concat([df_lob_period1, df_lob_period2])
+
+                # 1. Calculate total magnitude for each LOB (across all periods and quarters)
+                lob_totals = (
+                    combined_lob_df[combined_lob_df['LOB'] != "Grand Total"]
+                    .groupby('LOB')['Value']
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+
+                # 2. Get the sorted LOBs by magnitude
+                lobs = lob_totals.index.tolist()
+                periods = ["Period 1", "Period 2"]
+
+                fig_lob_stack = make_subplots(specs=[[{"secondary_y": True}]])
+
+                # 3. Add area (stacked) traces for each LOB as secondary_y=False, in sorted order
+                for period in periods:
+                    for i, lob in enumerate(lobs):
+                        df_plot = combined_lob_df[(combined_lob_df['LOB'] == lob) & (combined_lob_df['Period'] == period)]
+                        color = stack_palette[i % len(stack_palette)]
+                        y_vals = df_plot['Value'].values
+                        fig_lob_stack.add_trace(go.Bar(
+                            x=x_axis,
+                            y=y_vals,
+                            name=f"{lob}",
+                            offsetgroup=period,
+                            legendgroup=lob,
+                            marker=dict(color=color),
+                            showlegend=(period == periods[0])
+                        ), secondary_y=False)
+
+                # Add invisible dummy trace at y=0 to force axis to show zero
+                fig_lob_stack.add_trace(go.Scatter(
+                    x=[x_axis[0]],
+                    y=[0],
+                    mode='markers',
+                    marker=dict(color='rgba(0,0,0,0)'),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ), secondary_y=True)
+
+                # Add Grand Total lines as secondary_y=True
+                fig_lob_stack.add_trace(go.Scatter(
+                    x=x_axis,
+                    y=grand_total_line_period1,
+                    mode='lines+markers',
+                    name='Grand Total (Period 1)',
+                    line=dict(color='#17607D', width=3, dash='solid'),
+                    marker=dict(size=5, color='#17607D'),
+                    showlegend=True
+                ), secondary_y=True)
+
+                fig_lob_stack.add_trace(go.Scatter(
+                    x=x_axis,
+                    y=grand_total_line_period2,
+                    mode='lines+markers',
+                    name='Grand Total (Period 2)',
+                    line=dict(color='#43AA8B', width=3, dash='dash'),
+                    marker=dict(size=5, color='#43AA8B'),
+                    showlegend=True
+                ), secondary_y=True)
+
+                fig_lob_stack.update_layout(
+                    barmode='relative',
+                    bargap=0.2,
+                    bargroupgap=0.05,
+                    title="",
+                    xaxis=dict(
+                        title="", 
+                        categoryorder='array', 
+                        categoryarray=x_axis,
+                        automargin=True
+                    ),
+                    yaxis=dict(
+                        title="Value",
+                        automargin=True
+                    ),
+                    yaxis2=dict(
+                        title="Grand Total Line",
+                        range=[0, None],
+                        overlaying='y',
+                        side='right',
+                        automargin=True
+                    ),
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=12),
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    height=350,
+                    width=800,
+                    margin=dict(l=30, r=30, t=30, b=40),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.25,
+                        xanchor="left",
+                        x=0,
+                        maxheight=0.08,
+                        font=dict(size=12, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    )
+                )
+
+                st.markdown(
+                    f"<div style='font-size:1.3rem; font-weight:700; color:#17607D; margin-bottom:0.05px; font-family:Montserrat, Segoe UI, Arial, sans-serif;'>({period1} vs {period2})</div>",
+                    unsafe_allow_html=True
+                )
+                st.plotly_chart(fig_lob_stack, use_container_width=True)
+                
+                
+                
+                st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)  # Spacer
+                # --- LOB stacked area chart--
+                
+               
+                # --- Combined Excel Download for Period 1 and Period 2 Table Data ---
+                pdf_columns = ['DATE', 'Scenario', 'LOB', 'StressMethod3', 'Base', 'Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9']
+
+                # Filter for Period 1
+                filtered_pdf_df_period1 = first_df[
+                    (first_df['DATE'] == period1) &
+                    (first_df['Scenario'] == st.session_state.selected_scenario)
+                ]
+                agg_df_period1 = filtered_pdf_df_period1[pdf_columns].groupby(
+                    ['DATE', 'Scenario', 'LOB', 'StressMethod3'], as_index=False
+                ).sum()
+
+                # Filter for Period 2
+                filtered_pdf_df_period2 = first_df[
+                    (first_df['DATE'] == period2) &
+                    (first_df['Scenario'] == st.session_state.selected_scenario)
+                ]
+                agg_df_period2 = filtered_pdf_df_period2[pdf_columns].groupby(
+                    ['DATE', 'Scenario', 'LOB', 'StressMethod3'], as_index=False
+                ).sum()
+
+                # Write both DataFrames to one Excel file with two sheets
+                excel_buffer_combined = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer_combined, engine='xlsxwriter') as writer:
+                    agg_df_period1.to_excel(writer, index=False, sheet_name=f'Period1_{period1}')
+                    agg_df_period2.to_excel(writer, index=False, sheet_name=f'Period2_{period2}')
+                excel_buffer_combined.seek(0)
+
+                # Single download button
+                st.download_button(
+                    label=f"Download Period 1 & 2 Tables as Excel",
+                    data=excel_buffer_combined,
+                    file_name=f"VA_Tables_{period1}_{period2}_Scenario_{st.session_state.selected_scenario}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_combined_table"
+                )
+
+            with col_comments:
+                comment_key_stress = (
+                    f"expander2_stress_{period1}_{period2}_{st.session_state.selected_scenario}"
+                )
+                current_comment_stress = st.session_state["comments"].get(comment_key_stress, "")
+                comment_stress = st.text_area(
+                    f"Add your comment for StressMethod3 Stacked Chart: {period1} {period2} {st.session_state.selected_scenario}",
+                    value=current_comment_stress,
+                    key=comment_key_stress,height=400
+                )
+                
+                if comment_stress != current_comment_stress:
+                    st.session_state["comments"][comment_key_stress] = comment_stress
+                    save_comments(st.session_state["comments"])
+
+                st.markdown("<div style='height:100px;'></div>", unsafe_allow_html=True)  # Spacer
+                # --- Comment for LOB chart ---
+                comment_key_lob = (
+                    f"expander2_lob_{period1}_{period2}_{st.session_state.selected_scenario}"
+                )
+                current_comment_lob = st.session_state["comments"].get(comment_key_lob, "")
+                comment_lob = st.text_area(
+                    f"Add your comment for LOB Stacked Chart: {period1} {period2} {st.session_state.selected_scenario}",
+                    value=current_comment_lob,
+                    key=comment_key_lob,height=400
+                )
+                if comment_lob != current_comment_lob:
+                    st.session_state["comments"][comment_key_lob] = comment_lob
+                    save_comments(st.session_state["comments"])
+            
+        with st.expander("", expanded=True):
+            # --LOB filter--
+            lob_options = second_df['LOB'].drop_duplicates().sort_values()
+            selected_lob = st.selectbox("Select LOB", lob_options, key="lob_select_analysis")
+
+            # Filter for selected LOB and periods
+            filtered_second_df_period1 = second_df[
+                (second_df['DATE'] == period1) &
+                (second_df['Scenario'] == st.session_state.selected_scenario) &
+                (second_df['LOB'] == selected_lob)
+            ].copy()
+            filtered_second_df_period2 = second_df[
+                (second_df['DATE'] == period2) &
+                (second_df['Scenario'] == st.session_state.selected_scenario) &
+                (second_df['LOB'] == selected_lob)
+            ].copy()
+
+            # Create quarterly columns for both
+            for df in [filtered_second_df_period1, filtered_second_df_period2]:
+                df['Quarter1'] = df['M1'] + df['M2'] + df['Q1']
+                df['Quarter2'] = df['M4'] + df['M5'] + df['Q2']
+                df['Quarter3'] = df['M7'] + df['M8'] + df['Q3']
+                df['Quarter4'] = df['M10'] + df['M11'] + df['Q4']
+                df['Quarter5'] = df['M13'] + df['M14'] + df['Q5']
+                df['Quarter6'] = df['M16'] + df['M17'] + df['Q6']
+                df['Quarter7'] = df['M19'] + df['M20'] + df['Q7']
+                df['Quarter8'] = df['M22'] + df['M23'] + df['Q8']
+                df['Quarter9'] = df['M25'] + df['M26'] + df['Q9']
+
+            quarter_cols = ['Quarter1', 'Quarter2', 'Quarter3', 'Quarter4', 'Quarter5', 'Quarter6', 'Quarter7', 'Quarter8', 'Quarter9']
+
+            # Get all unique StressMethod3 for the selected LOB
+            stress_methods = pd.concat([filtered_second_df_period1, filtered_second_df_period2])['StressMethod3'].dropna().unique()
+            stress_methods = sorted(stress_methods)
+
+
+        
+
+
+            # Use the same palette as page 1
+            stack_palette = [
+                "#3D5A80", "#B5838D","#F4D35E","#1b8a18",  "#97422A"
+            ]
+            line_palette = stack_palette  # Use the same palette for lines
+
+            for stress in stress_methods:
+                # Prepare data for this stress method
+                df1 = filtered_second_df_period1[filtered_second_df_period1['StressMethod3'] == stress]
+                df2 = filtered_second_df_period2[filtered_second_df_period2['StressMethod3'] == stress]
+
+                def get_stacked_data(df, period_label):
+                    data = []
+                    for variable in df['Variable'].unique():
+                        row = df[df['Variable'] == variable]
+                        for q in quarter_cols:
+                            if not row.empty:
+                                value = row[q].values[0]
+                                data.append({'Variable': variable, 'Quarter': q, 'Value': value, 'Period': period_label})
+                    return pd.DataFrame(data)
+
+                df_period1 = get_stacked_data(df1, f"{period1}")
+                df_period2 = get_stacked_data(df2, f"{period2}")
+                combined_df = pd.concat([df_period1, df_period2])
+
+                variables = combined_df['Variable'].unique()
+                variable_colors = {var: stack_palette[i % len(stack_palette)] for i, var in enumerate(variables)}
+                periods = [f"{period1}", f"{period2}"]
+
+                # --- Stacked Bar Chart (relative) ---
+                fig_stack = go.Figure()
+                for period in periods:
+                    for i, variable in enumerate(variables):
+                        df_plot = combined_df[(combined_df['Variable'] == variable) & (combined_df['Period'] == period)]
+                        # Get mul value from df1 or df2 depending on period
+                        if period == f"{period1}":
+                            mul_val = df1[df1['Variable'] == variable]['Mul'].iloc[0] if 'Mul' in df1.columns and not df1[df1['Variable'] == variable].empty else None
+                        else:
+                            mul_val = df2[df2['Variable'] == variable]['Mul'].iloc[0] if 'Mul' in df2.columns and not df2[df2['Variable'] == variable].empty else None
+                        legend_name = f"{variable} [mul: {mul_val:.2f}]" if mul_val is not None else variable
+                        fig_stack.add_trace(go.Bar(
+                            x=df_plot['Quarter'],
+                            y=df_plot['Value'],
+                            name=legend_name,
+                            offsetgroup=period,
+                            legendgroup=variable,
+                            marker=dict(color=variable_colors[variable], line=dict(width=0)),
+                            showlegend=(period == periods[0]),  # Show legend only for period1 to avoid duplicates---
+                        ))
+                fig_stack.update_layout(
+                    barmode='relative',
+                    bargap=0.2,
+                    bargroupgap=0.05,
+                    title="",
+                    xaxis=dict(title="", categoryorder='array', categoryarray=quarter_cols),
+                    yaxis=dict(title="Value"),
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11),
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    height=350,legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.55,  # Move further down if needed
+                        xanchor="center",
+                        x=0.5,maxheight=0.03,
+                        font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    )
+                )
+
+                # --- MEV Line Chart (period1 solid, period2 dashed, same color for same variable)---
+                mev_vars = mev_mapping[
+                    (mev_mapping['LOB'] == selected_lob) &
+                    (mev_mapping['StressMethod3'] == stress)
+                ]['Variable'].unique()
+                mev_x_cols = [
+                    'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                    'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+                ]
+                scenario_key1 = st.session_state.selected_scenario.split()[0]
+                scenario_key2 = st.session_state.selected_scenario.split()[0]  # If scenario changes, update accordingly
+
+                mev_df1 = mev_dfs.get(scenario_key1)
+                mev_df2 = mev_dfs.get(scenario_key2)
+
+                # Filter MEV data for each period
+                mev_df1_period = mev_df1[mev_df1['DATE'] == period1]
+                mev_df2_period = mev_df2[mev_df2['DATE'] == period2]
+
+                
+
+
+                fig_line = go.Figure()
+                for i, var in enumerate(mev_vars):
+                    # Period 1 line (solid)
+                    row_data1 = mev_df1_period[(mev_df1_period['Variable'] == var)]
+                    if not row_data1.empty:
+                        y_vals1 = row_data1.iloc[0][mev_x_cols].values.astype(float)
+                        mean1 = np.mean(y_vals1)
+                        std1 = np.std(y_vals1)
+                        standardized1 = (y_vals1 - mean1) / std1 if std1 != 0 else np.zeros_like(y_vals1)
+                        fig_line.add_trace(go.Scatter(
+                            x=mev_x_cols,
+                            y=standardized1,
+                            mode='lines+markers',
+                            name=f"{var} ({period1})",
+                            line=dict(color=line_palette[i % len(line_palette)], width=2, dash='solid'),
+                            marker=dict(size=6),
+                            legendgroup=var,
+                            showlegend=True
+                        ))
+                    # Period 2 line (dashed)
+                    row_data2 = mev_df2_period[(mev_df2_period['Variable'] == var)]
+                    if not row_data2.empty:
+                        y_vals2 = row_data2.iloc[0][mev_x_cols].values.astype(float)
+                        mean2 = np.mean(y_vals2)
+                        std2 = np.std(y_vals2)
+                        standardized2 = (y_vals2 - mean2) / std2 if std2 != 0 else np.zeros_like(y_vals2)
+                        fig_line.add_trace(go.Scatter(
+                            x=mev_x_cols,
+                            y=standardized2,
+                            mode='lines+markers',
+                            name=f"{var} ({period2})",
+                            line=dict(color=line_palette[i % len(line_palette)], width=2, dash='dash'),
+                            marker=dict(size=6),
+                            legendgroup=var,
+                            showlegend=True  # Show legend for both periods
+                        ))
+                fig_line.update_layout(
+                    title="",
+                    xaxis_title="",
+                    yaxis_title="Standardized MEV Value (z-score)",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.22,
+                        xanchor="left",
+                        x=0,maxheight=0.03,
+                        font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    ),width=900,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=350,
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                )
+
+                # --- Display Side by Side in One Row ---
+                col_stack, col_line = st.columns(2)
+                with col_stack:
+                    st.markdown(
+                        f"<div style='font-size:22px; font-weight:700; color:#17607D; font-family:Montserrat, Segoe UI, Arial, sans-serif; margin-bottom:2px;'>{stress} ({period1} vs {period2})</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.plotly_chart(fig_stack, use_container_width=True)
+                    comment_key_stack = (
+                        f"expander2_stack_{period1}_{period2}_{selected_lob}_{st.session_state.selected_scenario}_{stress}"
+                    )
+                    current_comment_stack = st.session_state["comments"].get(comment_key_stack, "")
+                    comment_stack = st.text_area(
+                        f"Add your comment for Stacked Chart: {selected_lob} {period1} {period2} {st.session_state.selected_scenario} {stress}",
+                        value=current_comment_stack,
+                        key=comment_key_stack
+                    )
+                    if comment_stack != current_comment_stack:
+                        st.session_state["comments"][comment_key_stack] = comment_stack
+                        save_comments(st.session_state["comments"])
+                with col_line:
+                    st.markdown(
+                        f"<div style='font-size:22px; font-weight:700; color:#17607D; font-family:Montserrat, Segoe UI, Arial, sans-serif; margin-bottom:2px;'>Standardized MEVs</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.plotly_chart(fig_line, use_container_width=True)
+                    comment_key_line = (
+                        f"expander2_line_{period1}_{period2}_{selected_lob}_{st.session_state.selected_scenario}_{stress}"
+                    )
+                    current_comment_line = st.session_state["comments"].get(comment_key_line, "")
+                    comment_line = st.text_area(
+                        f"Add your comment for Line Chart: {selected_lob} {period1} {period2} {st.session_state.selected_scenario} {stress}",
+                        value=current_comment_line,
+                        key=comment_key_line
+                    )
+                    if comment_line != current_comment_line:
+                        st.session_state["comments"][comment_key_line] = comment_line
+                        save_comments(st.session_state["comments"])                
+
+        with st.expander("", expanded=True):
+            # --- Prepare LOB Level Max Mul for both periods ---
+            filtered_mul_df_period1 = mul_df[
+                (mul_df['DATE'] == period1) &
+                (mul_df['Scenario'] == st.session_state.selected_scenario)
+            ]
+            filtered_mul_df_period2 = mul_df[
+                (mul_df['DATE'] == period2) &
+                (mul_df['Scenario'] == st.session_state.selected_scenario)
+            ]
+
+            mapping_cols = [
+                'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+            ]
+            custom_colors = [
+                "#7f7f7f", "#bcbd22","#1f77b4","#8c564b","#e377c2", "#ff7f0e",   "#2ca02c", "#d62728", "#9467bd"
+                 ,"#17becf"]
+
+            def get_max_mul_chart(df, title):
+                unique_mappings = df['Mapping'].unique()
+                mapping_to_y = {mapping: [np.nan]*len(mapping_cols) for mapping in unique_mappings}
+                max_values = []
+                max_mappings = []
+                for col in mapping_cols:
+                    idxmax = df[col].idxmax()
+                    max_val = df.loc[idxmax, col] if not pd.isna(idxmax) else np.nan
+                    max_map = df.loc[idxmax, 'Mapping'] if not pd.isna(idxmax) else None
+                    max_values.append(max_val)
+                    max_mappings.append(max_map)
+                for i, mapping in enumerate(max_mappings):
+                    if mapping is not None:
+                        mapping_to_y[mapping][i] = max_values[i]
+                fig = go.Figure()
+                for i, mapping in enumerate(unique_mappings):
+                    fig.add_trace(go.Scatter(
+                        x=mapping_cols,
+                        y=mapping_to_y[mapping],
+                        mode='lines+markers',
+                        name=mapping,
+                        line=dict(color=custom_colors[i % len(custom_colors)], width=2),
+                        marker=dict(size=8, color=custom_colors[i % len(custom_colors)]),
+                        connectgaps=False
+                    ))
+                fig.update_layout(
+                    title=title,
+                    xaxis_title="",
+                    yaxis_title="Max Mul",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.22,
+                        xanchor="left",
+                        x=-0.05,
+                        font=dict(size=10, family="Montserrat, Segoe UI, Arial, sans-serif")
+                    ),
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=350,
+                    plot_bgcolor="#f8fbfd",
+                    paper_bgcolor="#f8fbfd",
+                    font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                )
+                return fig
+
+            col_lob1, col_lob2 = st.columns(2)
+            with col_lob1:
+                fig_max_period1 = get_max_mul_chart(filtered_mul_df_period1, f"LOB Level Max Mul ({period1})")
+                st.plotly_chart(fig_max_period1, use_container_width=True)
+                # --- Comment Box for LOB Level Max Mul, Period 1 ---
+                comment_key_lob_maxmul1 = f"expander3_lobmaxmul_{period1}_{st.session_state.selected_scenario}"
+                current_comment_lob_maxmul1 = st.session_state["comments"].get(comment_key_lob_maxmul1, "")
+                comment_lob_maxmul1 = st.text_area(
+                    f"Add your comment for LOB Level Max Mul Line Chart: {period1} {st.session_state.selected_scenario}",
+                    value=current_comment_lob_maxmul1,
+                    key=comment_key_lob_maxmul1
+                )
+                if comment_lob_maxmul1 != current_comment_lob_maxmul1:
+                    st.session_state["comments"][comment_key_lob_maxmul1] = comment_lob_maxmul1
+                    save_comments(st.session_state["comments"])
+
+            with col_lob2:
+                fig_max_period2 = get_max_mul_chart(filtered_mul_df_period2, f"LOB Level Max Mul ({period2})")
+                st.plotly_chart(fig_max_period2, use_container_width=True)
+                # --- Comment Box for LOB Level Max Mul, Period 2 ---
+                comment_key_lob_maxmul2 = f"expander3_lobmaxmul_{period2}_{st.session_state.selected_scenario}"
+                current_comment_lob_maxmul2 = st.session_state["comments"].get(comment_key_lob_maxmul2, "")
+                comment_lob_maxmul2 = st.text_area(
+                    f"Add your comment for LOB Level Max Mul Line Chart: {period2} {st.session_state.selected_scenario}",
+                    value=current_comment_lob_maxmul2,
+                    key=comment_key_lob_maxmul2
+                )
+                if comment_lob_maxmul2 != current_comment_lob_maxmul2:
+                    st.session_state["comments"][comment_key_lob_maxmul2] = comment_lob_maxmul2
+                    save_comments(st.session_state["comments"])
+
+                    
+            # --- Desk Level Max Mul for both periods ---
+            filtered_mul_df1_period1 = mul_df1[
+                (mul_df1['DATE'] == period1) &
+                (mul_df1['Scenario'] == st.session_state.selected_scenario)
+            ]
+            filtered_mul_df1_period2 = mul_df1[
+                (mul_df1['DATE'] == period2) &
+                (mul_df1['Scenario'] == st.session_state.selected_scenario)
+            ]
+            unique_lobs = filtered_mul_df1_period1['LOB'].unique()
+
+            desk_charts_period1 = []
+            desk_charts_period2 = []
+            for lob in unique_lobs:
+                lob_df1 = filtered_mul_df1_period1[filtered_mul_df1_period1['LOB'] == lob]
+                lob_df2 = filtered_mul_df1_period2[filtered_mul_df1_period2['LOB'] == lob]
+                fig1 = get_max_mul_chart(lob_df1, f"{lob} ({period1})")
+                fig2 = get_max_mul_chart(lob_df2, f"{lob} ({period2})")
+                desk_charts_period1.append((lob, fig1))
+                desk_charts_period2.append((lob, fig2))
+
+            # Display only the first two desk charts side by side for each period
+            st.markdown("<br><div style='font-size:1.3rem; font-weight:700; color:#17607D;'>Desk Level Max Mul</div>", unsafe_allow_html=True)
+            col_desk1, col_desk2 = st.columns(2)
+            with col_desk1:
+                if len(desk_charts_period1) >= 1:
+                    st.plotly_chart(desk_charts_period1[0][1], use_container_width=True)
+                    # --- Comment Box for Desk Chart 1, Period 1 ---
+                    comment_key_line1 = f"expander3_line_{period1}_{st.session_state.selected_scenario}_{lob_name_1}_period1"
+                    current_comment_line1 = st.session_state["comments"].get(comment_key_line1, "")
+                    comment_line1 = st.text_area(
+                        f"Add your comment for Desk Line Chart: {lob_name_1} {period1} {st.session_state.selected_scenario}",
+                        value=current_comment_line1,
+                        key=comment_key_line1
+                    )
+                    if comment_line1 != current_comment_line1:
+                        st.session_state["comments"][comment_key_line1] = comment_line1
+                        save_comments(st.session_state["comments"])
+
+                if len(desk_charts_period1) >= 2:
+                    st.plotly_chart(desk_charts_period1[1][1], use_container_width=True)
+                    # --- Comment Box for Desk Chart 2, Period 1 ---
+                    comment_key_line2 = f"expander3_line_{period2}_{st.session_state.selected_scenario}_{lob_name_2}_period2"
+                    current_comment_line2 = st.session_state["comments"].get(comment_key_line2, "")
+                    comment_line2 = st.text_area(
+                        f"Add your comment for Desk Line Chart: {lob_name_2} {period1} {st.session_state.selected_scenario}",
+                        value=current_comment_line2,
+                        key=comment_key_line2
+                    )
+                    if comment_line2 != current_comment_line2:
+                        st.session_state["comments"][comment_key_line2] = comment_line2
+                        save_comments(st.session_state["comments"])
+
+            with col_desk2:
+                if len(desk_charts_period2) >= 1:
+                    lob_name_1 = desk_charts_period2[0][0]
+                    st.plotly_chart(desk_charts_period2[0][1], use_container_width=True)
+                    # --- Comment Box for Desk Chart 1, Period 2 ---
+                    comment_key_line1_p2 = f"expander3_line_{period2}_{st.session_state.selected_scenario}_{lob_name_1}_period2_col0"
+                    current_comment_line1_p2 = st.session_state["comments"].get(comment_key_line1_p2, "")
+                    comment_line1_p2 = st.text_area(
+                        f"Add your comment for Desk Line Chart: {lob_name_1} {period2} {st.session_state.selected_scenario}",
+                        value=current_comment_line1_p2,
+                        key=comment_key_line1_p2
+                    )
+                    if comment_line1_p2 != current_comment_line1_p2:
+                        st.session_state["comments"][comment_key_line1_p2] = comment_line1_p2
+                        save_comments(st.session_state["comments"])
+                    
+                    
+                if len(desk_charts_period2) >= 2:
+                    lob_name_2 = desk_charts_period2[1][0]
+                    st.plotly_chart(desk_charts_period2[1][1], use_container_width=True)
+                    # --- Comment Box for Desk Chart 2, Period 2 ---
+                    comment_key_line2_p2 = f"expander3_line_{period2}_{st.session_state.selected_scenario}_{lob_name_2}_period2_col1"
+                    current_comment_line2_p2 = st.session_state["comments"].get(comment_key_line2_p2, "")
+                    comment_line2_p2 = st.text_area(
+                        f"Add your comment for Desk Line Chart: {lob_name_2} {period2} {st.session_state.selected_scenario}",
+                        value=current_comment_line2_p2,
+                        key=comment_key_line2_p2
+                    )
+                    if comment_line2_p2 != current_comment_line2_p2:
+                        st.session_state["comments"][comment_key_line2_p2] = comment_line2_p2
+                        save_comments(st.session_state["comments"])
+
+
+            selected_lob = st.session_state.get("lob_select_analysis", None)
+            stress_methods = mev_mapping[mev_mapping['LOB'] == selected_lob]['StressMethod3'].unique()
+            mev_x_cols = [
+                'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+            ]
+            line_palette = [
+                "#7f7f7f", "#bcbd22","#1f77b4","#8c564b","#e377c2", "#ff7f0e",   "#2ca02c", "#d62728", "#9467bd"
+                 ,"#17becf"
+            ]
+            for stress in stress_methods:
+                scenario_key1 = st.session_state.selected_scenario.split()[0]
+                scenario_key2 = st.session_state.selected_scenario.split()[0]
+                mev_df1 = mev_dfs.get(scenario_key1)
+                mev_df2 = mev_dfs.get(scenario_key2)
+                mev_vars = mev_mapping[
+                    (mev_mapping['LOB'] == selected_lob) &
+                    (mev_mapping['StressMethod3'] == stress)
+                ]['Variable'].unique()
+                mev_df1_period = mev_df1[mev_df1['DATE'] == period1]
+                mev_df2_period = mev_df2[mev_df2['DATE'] == period2]
+                fig_line = go.Figure()
+                for i, var in enumerate(mev_vars):
+                    # Period 1 line (solid, dots)
+                    row_data1 = mev_df1_period[(mev_df1_period['Variable'] == var)]
+                    if not row_data1.empty:
+                        y_vals1 = row_data1.iloc[0][mev_x_cols].values.astype(float)
+                        mean1 = np.mean(y_vals1)
+                        std1 = np.std(y_vals1)
+                        standardized1 = (y_vals1 - mean1) / std1 if std1 != 0 else np.zeros_like(y_vals1)
+                        fig_line.add_trace(go.Scatter(
+                            x=mev_x_cols,
+                            y=standardized1,
+                            mode='lines+markers',
+                            name=f"{var} ({period1})",
+                            line=dict(color=line_palette[i % len(line_palette)], width=2, dash='solid'),
+                            marker=dict(size=8, symbol='circle'),
+                            legendgroup=var,
+                            showlegend=True
+                        ))
+
+
+        with st.expander("", expanded=True):
+            # --- Multi-select dropdown for variables from MEV Mapping ---
+            all_variables = mev_mapping['Variable'].drop_duplicates().sort_values().tolist()
+            selected_variables = st.multiselect(
+                "Select MEV",
+                options=all_variables,
+                default=all_variables[:3],  # Default: first 3 variables, adjust as needed
+                key="variable_linechart_select"
+            )
+
+            # --- Prepare x-axis columns ---
+            mev_x_cols = [
+                'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+                'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+            ]
+
+            # --- Prepare data for both periods ---
+            scenario_key = st.session_state.selected_scenario.split()[0]
+            period1 = st.session_state.selected_quarter
+            period2 = st.session_state.selected_period2
+
+            # Combine all MEV dataframes for the selected scenario
+            mev_df_period1 = pd.concat([
+                df[(df['DATE'] == period1) & (df['Scenario'] == scenario_key)]
+                for df in mev_dfs.values()
+            ], ignore_index=True)
+            mev_df_period2 = pd.concat([
+                df[(df['DATE'] == period2) & (df['Scenario'] == scenario_key)]
+                for df in mev_dfs.values()
+            ], ignore_index=True)
+
+            # --- Color palette for charts ---
+            line_palette = [
+                "#7f7f7f", "#bcbd22","#1f77b4","#8c564b","#e377c2", "#ff7f0e",   "#2ca02c", "#d62728", "#9467bd"
+                 ,"#17becf"
+            ]
+
+            # --- Show up to 3 charts per row ---
+            for i in range(0, len(selected_variables), 3):
+                cols = st.columns(3)
+                for j in range(3):
+                    if i + j < len(selected_variables):
+                        var = selected_variables[i + j]
+                        fig = go.Figure()
+                        # Period 1 (solid)--
+                        row1 = mev_df_period1[mev_df_period1['Variable'] == var]
+                        if not row1.empty:
+                            y1 = row1.iloc[0][mev_x_cols].values.astype(float)
+                            fig.add_trace(go.Scatter(
+                                x=mev_x_cols,
+                                y=y1,
+                                mode='lines+markers',
+                                name=f"{var} ({period1})",
+                                line=dict(color=line_palette[(i + j) % len(line_palette)], width=2, dash='solid'),
+                                marker=dict(size=5),
+                                legendgroup=var,
+                                showlegend=True
+                            ))
+                        # Period 2 (dashed)--
+                        row2 = mev_df_period2[mev_df_period2['Variable'] == var]
+                        if not row2.empty:
+                            y2 = row2.iloc[0][mev_x_cols].values.astype(float)
+                            fig.add_trace(go.Scatter(
+                                x=mev_x_cols,
+                                y=y2,
+                                mode='lines+markers',
+                                name=f"{var} ({period2})",
+                                line=dict(color=line_palette[(i + j) % len(line_palette)], width=2, dash='dash'),
+                                marker=dict(size=5),
+                                legendgroup=var,
+                                showlegend=True
+                            ))
+                        fig.update_layout(
+                            title=f"{var}",
+                            xaxis_title="",
+                            yaxis_title="Value",
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=-0.25,
+                                xanchor="left",
+                                x=0,maxheight=0.05,
+                                font=dict(size=11, family="Montserrat, Segoe UI, Arial, sans-serif")
+                            ),
+                            margin=dict(l=10, r=10, t=30, b=10),
+                            height=400,
+                            plot_bgcolor="#f8fbfd",
+                            paper_bgcolor="#f8fbfd",
+                            font=dict(family="Montserrat, Segoe UI, Arial, sans-serif", size=11)
+                        )
+
+                        with cols[j]:
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                key=f"plotly_chart_{var}_{i}_{j}_{period1}_{period2}"
+                            )
+
+    with tabs[2]:
+        st.markdown("<h2 style='color:#17607D;'>Model Prompter & Polynomial Regression Analysis</h2>", unsafe_allow_html=True)
+
+        mev_x_cols = [
+            'M1','M2','Q1','M4','M5','Q2','M7','M8','Q3','M10','M11','Q4',
+            'M13','M14','Q5','M16','M17','Q6','M19','M20','Q7','M22','M23','Q8','M25','M26','Q9'
+        ]
+
+        # Build template rows: for each row in mev_final_df, NO multiplier column
+        rows = []
+        for _, row in mev_final_df.iterrows():
+            template_row = {
+                "LOB": row['lob'],
+                "StressMethod3": row['stressmethod3'],
+                "MEV": row['mev'],
+            }
+            for col in mev_x_cols:
+                template_row[col] = 0.0
+            rows.append(template_row)
+
+        template_df = pd.DataFrame(rows)
+        csv_buffer = io.StringIO()
+        template_df.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+
+        st.download_button(
+            label="Download CSV Format Template",
+            data=csv_buffer.getvalue(),
+            file_name="model_template.csv",
+            mime="text/csv"
+        )
+        # --- CSV Upload and Session State ---
+        uploaded_csv = st.file_uploader("Upload CSV data for model (optional)", type=["csv"], key="model_csv")
+        if "uploaded_model_df" not in st.session_state:
+            st.session_state["uploaded_model_df"] = None
+
+        if uploaded_csv is not None:
+            st.session_state["uploaded_model_df"] = pd.read_csv(uploaded_csv)
+            st.success("CSV data loaded! Model will use this data.")
+        elif st.session_state["uploaded_model_df"] is not None:
+            st.info("Using previously uploaded CSV data for model.")
+
+        # Clear button
+        if st.session_state["uploaded_model_df"] is not None:
+            if st.button("Clear CSV and use scenario/period data", key="clear_csv_model"):
+                st.session_state["uploaded_model_df"] = None
+                
+
+        # --- Helper: Get MEV values for a given MEV name ---
+        def get_mev_values(mev_name, mev_dfs, use_df=None):
+            # If using uploaded CSV, get values from there
+            if use_df is not None:
+                # Try to find the row for this MEV
+                df = use_df
+                # Standardize column names
+                df.columns = df.columns.str.strip().str.lower()
+                mev_col_csv = None
+                for col in df.columns:
+                    if col.lower() in ["mev", "mev_final", "variable"]:
+                        mev_col_csv = col
+                        break
+                if mev_col_csv is None:
+                    st.error("CSV must have a column named 'MEV', 'MEV_final', or 'Variable'.")
+                    return np.zeros(len(mev_x_cols))
+                row = df[df[mev_col_csv] == mev_name.replace('_diff1','').replace('_lag1','')]
+                if not row.empty:
+                    # Try to get values for mev_x_cols
+                    vals = []
+                    for col in mev_x_cols:
+                        col_lc = col.lower()
+                        # Try exact match, then lower-case match
+                        if col in df.columns:
+                            vals.append(row.iloc[0][col])
+                        elif col_lc in df.columns:
+                            vals.append(row.iloc[0][col_lc])
+                        else:
+                            vals.append(0)
+                    return np.array(vals, dtype=float)
+                return np.zeros(len(mev_x_cols))
+            # Otherwise, use default logic
+            for scenario, df in mev_dfs.items():
+                if mev_name.replace('_diff1','').replace('_lag1','') in df['Variable'].values:
+                    row = df[df['Variable'] == mev_name.replace('_diff1','').replace('_lag1','')]
+                    if not row.empty:
+                        return row.iloc[0][mev_x_cols].values.astype(float)
+            return np.zeros(len(mev_x_cols))
+
+        def transform_mev(mev_name, mev_dfs, use_df=None):
+            values = get_mev_values(mev_name, mev_dfs, use_df=use_df)
+            if mev_name.endswith('diff1'):
+                return np.array([values[i] - values[i-1] if i > 0 else values[i] for i in range(len(values))])
+            elif mev_name.endswith('lag1'):
+                return np.array([values[i-1] if i > 0 else values[0] for i in range(len(values))])
+            else:
+                return values
+
+        def standardize_mev(mev_name, transformed, mev_param_df):
+            param_row = mev_param_df[mev_param_df['MEV_final'] == mev_name]
+            if not param_row.empty:
+                mean = param_row['mean'].values[0]
+                std = param_row['std'].values[0]
+                if std != 0:
+                    return (transformed - mean) / std
+            return transformed
+
+        # --- Robust StressMethod3 and LOB Column Handling ---
+        colnames_final = [c.strip().lower() for c in mev_final_df.columns]
+        colnames_param = [c.strip().lower() for c in mev_param_df.columns]
+
+        if 'lob' in colnames_final:
+            lob_col = mev_final_df.columns[colnames_final.index('lob')]
+            unique_lobs = mev_final_df[lob_col].unique()
+        else:
+            st.error(f"No 'LOB' column found! Columns are: {mev_final_df.columns.tolist()}")
+            st.stop()
+
+        if 'stressmethod3' in colnames_final:
+            stress_col = mev_final_df.columns[colnames_final.index('stressmethod3')]
+        else:
+            st.error(f"No 'stressmethod3' column found! Columns are: {mev_final_df.columns.tolist()}")
+            st.stop()
+
+        if 'mev' in colnames_final:
+            mev_col = mev_final_df.columns[colnames_final.index('mev')]
+        else:
+            st.error(f"No 'mev' column found! Columns are: {mev_final_df.columns.tolist()}")
+            st.stop()
+
+        if 'mev_final' in colnames_param:
+            mev_final_col = mev_param_df.columns[colnames_param.index('mev_final')]
+        else:
+            st.error(f"No 'MEV_final' column found! Columns are: {mev_param_df.columns.tolist()}")
+            st.stop()
+
+        # --- Use uploaded CSV or default data for model_rows ---
+        for lob in unique_lobs:
+            with st.expander(f"LOB: {lob}", expanded=False):
+                # If using CSV, filter by LOB if possible
+                if st.session_state["uploaded_model_df"] is not None:
+                    df_csv = st.session_state["uploaded_model_df"]
+                    df_csv.columns = df_csv.columns.str.strip().str.lower()
+                    # Try to filter by LOB if column exists
+                    if "lob" in df_csv.columns:
+                        lob_rows = df_csv[df_csv["lob"] == lob]
+                    else:
+                        lob_rows = df_csv
+                    # For stress, try to filter if column exists
+                    if "stressmethod3" in df_csv.columns:
+                        unique_stress = lob_rows["stressmethod3"].unique()
+                    else:
+                        unique_stress = [""]
+                else:
+                    lob_rows = mev_final_df[mev_final_df[lob_col] == lob]
+                    unique_stress = lob_rows[stress_col].unique()
+
+                for stress in unique_stress:
+                    if st.session_state["uploaded_model_df"] is not None:
+                        # If using CSV, filter by stress if possible
+                        if "stressmethod3" in lob_rows.columns:
+                            model_rows = lob_rows[lob_rows["stressmethod3"] == stress]
+                        else:
+                            model_rows = lob_rows
+                    else:
+                        model_rows = lob_rows[lob_rows[stress_col] == stress]
+
+                    # --- Get MEVs for prompter from parameter sheet ---
+                    prompter_mevs = mev_param_df[
+                        (mev_param_df['LOB'] == lob) &
+                        (mev_param_df['StressMethod3'] == stress)
+                    ][mev_final_col].unique().tolist()
+
+                    # --- Build std_mev_dict for all needed MEVs (including components) ---
+                    all_mev_names = set(prompter_mevs)
+                    for mev_name in prompter_mevs:
+                        if '*' in mev_name:
+                            parts = [p.strip() for p in mev_name.split('*')]
+                            all_mev_names.update(parts)
+                        if '^2' in mev_name:
+                            base_var = mev_name.replace('^2', '').strip()
+                            all_mev_names.add(base_var)
+                    # Always add 'Constant' if present in model_rows
+                    if not model_rows.empty and 'constant' in [str(x).lower() for x in model_rows[mev_col].values]:
+                        all_mev_names.add('Constant')
+
+                    std_mev_dict = {}
+                    for mev_name in all_mev_names:
+                        if mev_name.lower() == 'constant':
+                            std_mev_dict[mev_name] = np.ones(len(mev_x_cols))
+                        else:
+                            std_mev_dict[mev_name] = standardize_mev(
+                                mev_name,
+                                transform_mev(mev_name, mev_dfs, use_df=st.session_state["uploaded_model_df"] if st.session_state["uploaded_model_df"] is not None else None),
+                                mev_param_df
+                            )
+
+                    col_prompter, col_chart = st.columns([1, 2])
+                    with col_prompter:
+                        st.markdown(f"<b>StressMethod3: {stress}</b>", unsafe_allow_html=True)
+                        prompter_inputs = {}
+                        for mev_name in prompter_mevs:
+                            prompter_inputs[mev_name] = st.text_input(
+                                f"Input bump for {mev_name} (e.g. 5 for +5%, -5 for -5%)",
+                                value="0",
+                                key=f"{lob}_{stress}_{mev_name}"
+                            )
+
+                    with col_chart:
+                        # Standardize column names for model_rows
+                        model_rows.columns = model_rows.columns.str.strip().str.lower()
+                        # Build model inputs
+                        model_inputs = []
+                        for idx, row in model_rows.iterrows():
+                            mev_name = row[mev_col].strip()
+                            # Only use MEVs that are in the parameter sheet for this LOB/StressMethod3
+                            if mev_name not in prompter_mevs and mev_name.lower() != 'constant':
+                                continue
+                            bump_str = prompter_inputs.get(mev_name, "0")
+                            try:
+                                bump = float(bump_str)
+                            except:
+                                bump = 0
+                            std_mev = std_mev_dict[mev_name] * (1 + bump / 100)
+                            if '*' in mev_name:
+                                parts = [p.strip() for p in mev_name.split('*')]
+                                if parts[0] not in std_mev_dict or parts[1] not in std_mev_dict:
+                                    st.error(f"MEV '{parts[0]}' or '{parts[1]}' not found in std_mev_dict. Available keys: {list(std_mev_dict.keys())}")
+                                    continue
+                                val = std_mev_dict[parts[0]] * std_mev_dict[parts[1]]
+                            elif '^2' in mev_name:
+                                base_var = mev_name.replace('^2', '').strip()
+                                if base_var not in std_mev_dict:
+                                    st.error(f"MEV '{base_var}' not found in std_mev_dict. Available keys: {list(std_mev_dict.keys())}")
+                                    continue
+                                val = std_mev_dict[base_var] ** 2
+                            else:
+                                val = std_mev
+                            # Use correct multiplier column
+                            if st.session_state["uploaded_model_df"] is not None:
+                                # Lookup multiplier from mev_final_df using LOB, StressMethod3, MEV
+                                lookup = mev_final_df[
+                                    (mev_final_df['lob'] == row['lob']) &
+                                    (mev_final_df['stressmethod3'] == row['stressmethod3']) &
+                                    (mev_final_df['mev'] == row[mev_col])
+                                ]
+                                if not lookup.empty:
+                                    multiplier = lookup.iloc[0]['un standerdized variable_mult']
+                                else:
+                                    st.warning(f"Multiplier not found for {row['lob']}, {row['stressmethod3']}, {row[mev_col]}. Using 1.0.")
+                                    multiplier = 1.0
+                                val = val * multiplier
+                            else:
+                                # Use multiplier from model_rows as before
+                                mult_col = None
+                                for c in row.index:
+                                    if c.lower() in ['un standerdized variable_mult', 'unstanderdized variable_mult', 'un_standardized_variable_mult']:
+                                        mult_col = c
+                                        break
+                                if mult_col is None:
+                                    st.error("Multiplier column 'Un Standerdized Variable_Mult' not found in data.")
+                                    continue
+                                val = val * row[mult_col]
+                            model_inputs.append(val)
+
+                        # Sum for final output
+                        if len(model_inputs) > 0:
+                            final_output = np.sum(model_inputs, axis=0)
+                            # Remove M1 from both x and y
+                            mev_x_cols_no_m1 = mev_x_cols[1:]
+                            final_output_no_m1 = final_output[1:]
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=mev_x_cols_no_m1,
+                                y=final_output_no_m1,
+                                mode='lines+markers',
+                                name=f"{lob} - {stress} Output"
+                            ))
+                            fig.update_layout(
+                                title=f"Model Output for {lob} - {stress}",
+                                xaxis_title="",
+                                yaxis_title="Model Output",
+                                height=350,
+                                plot_bgcolor="#f8fbfd",
+                                paper_bgcolor="#f8fbfd"
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+
+
+# --- Main App ---
+page_dashboard()
